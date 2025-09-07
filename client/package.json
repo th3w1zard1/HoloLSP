@@ -1,0 +1,21 @@
+{
+  "name": "holo-lsp-client",
+  "description": "HoloLSP Client for KOTOR NWScript Language Server",
+  "author": "HoloLSP Team",
+  "license": "LGPL-3.0",
+  "version": "0.0.1",
+  "publisher": "holo-lsp",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/th3w1zard1/HoloLSP"
+  },
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^8.1.0"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.81.0"
+  }
+}

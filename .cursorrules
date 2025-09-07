@@ -1,0 +1,69 @@
+# HoloLSP - KOTOR NWScript Language Server Protocol Extension
+
+## Project Overview
+
+This is a VS Code Language Server Protocol (LSP) extension for NWScript, the scripting language used in Star Wars: Knights of the Old Republic (KOTOR) and Knights of the Old Republic II: The Sith Lords (TSL). The extension provides IntelliSense, syntax highlighting, error detection, and other language features specifically tailored for KOTOR's variant of NWScript.
+
+## Architecture
+
+- **Client**: VS Code extension client (`client/` directory)
+- **Server**: Language server implementation (`server/` directory)
+- **KOTOR-Specific**: Includes constants, functions, and features unique to KOTOR
+
+## Key Files Structure
+
+```bash
+├── client/                     # VS Code extension client
+│   ├── src/extension.ts       # Extension activation and client setup
+│   └── package.json           # Client dependencies
+├── server/                     # Language server implementation
+│   ├── src/
+│   │   ├── server.ts          # Main LSP server logic
+│   │   └── kotor-definitions.ts # KOTOR constants, functions, types
+│   └── package.json           # Server dependencies
+├── syntaxes/                   # Syntax highlighting
+│   └── nwscript.tmLanguage.json # TextMate grammar for NWScript
+├── language-configuration.json # Language configuration (brackets, comments, etc.)
+├── examples/                   # Sample NWScript files
+└── package.json               # Main extension manifest
+```
+
+## Reference Material
+See ./vendor which represents python code. The relevant parts only will need to be rewritten verbatim in TypeScript for the LSP.
+
+## Important Notes
+
+- **No Python Dependencies**: This extension is pure TypeScript/JavaScript
+- **KOTOR Focus**: Prioritize KOTOR-specific features over generic NWScript
+- **Performance**: Language server should be fast and responsive
+- **Extensibility**: Easy to add more constants/functions as needed
+
+## Common KOTOR Scripting Patterns
+
+```nwscript
+// Getting player character
+object oPC = GetFirstPC();
+
+// KOTOR-specific constants
+int nPlanet = PLANET_TARIS;
+int nDamage = DAMAGE_TYPE_BLASTER | DAMAGE_TYPE_ION;
+
+// Party management
+object oBastila = GetObjectByTag("bastila");
+AddAvailableNPCByTemplate(NPC_BASTILA, "p_bastilla");
+
+// Global variables (common in KOTOR)
+SetGlobalNumber("K_CURRENT_PLANET", PLANET_DANTOOINE);
+int nLevel = GetGlobalNumber("PLAYER_LEVEL");
+```
+
+## Debugging Tips
+
+- Check VS Code's Output panel for server logs
+- Use `connection.console.log()` in server code for debugging
+- Verify file associations are working (.nss files should use nwscript language)
+- Test completion with Ctrl+Space in .nss files
+
+## License
+
+LGPL-3.0 - See LICENSE file for details

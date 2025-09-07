@@ -1,0 +1,49 @@
+# Source files
+client/src/
+server/src/
+*.ts
+!*.d.ts
+
+# Development files
+.vscode/
+.cursorrules
+.editorconfig
+.gitignore
+.npmignore
+tsconfig*.json
+CONTRIBUTING.md
+CHANGELOG.md
+
+# Dependencies
+node_modules/
+
+# Build artifacts
+out/
+*.vsix
+
+# Documentation (keep README.md)
+# README.md should be included
+
+# Examples and vendor
+examples/
+vendor/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.idea/
+*.swp
+*.swo
+
+# Test files
+test/
+tests/
+**/*.test.*
+**/*.spec.*

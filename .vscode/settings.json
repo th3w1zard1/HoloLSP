@@ -1,0 +1,39 @@
+{
+  "typescript.preferences.includePackageJsonAutoImports": "auto",
+  "typescript.suggest.autoImports": true,
+  "typescript.updateImportsOnFileMove.enabled": "always",
+  "editor.formatOnSave": true,
+  "editor.codeActionsOnSave": {
+    "source.organizeImports": "explicit"
+  },
+  "files.associations": {
+    "*.nss": "nwscript",
+    "*.ncs": "nwscript"
+  },
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/out": true
+  },
+  "files.exclude": {
+    "**/node_modules": true,
+    "**/out": true,
+    "**/.git": true
+  },
+  "typescript.preferences.quoteStyle": "double",
+  "editor.tabSize": 2,
+  "editor.insertSpaces": true,
+  "editor.detectIndentation": false,
+  "[typescript]": {
+    "editor.defaultFormatter": "vscode.typescript-language-features",
+    "editor.tabSize": 2
+  },
+  "[json]": {
+    "editor.defaultFormatter": "vscode.json-language-features",
+    "editor.tabSize": 2
+  },
+  "[nwscript]": {
+    "editor.tabSize": 4,
+    "editor.insertSpaces": true,
+    "editor.wordWrap": "on"
+  }
+}
