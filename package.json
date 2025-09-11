@@ -138,7 +138,6 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -b",
     "watch": "tsc -b -w",
-    "postinstall": "cd client && npm install && cd ../server && npm install && cd ../mcp && npm install && cd ..",
     "build:tests": "npm run -w server build:tests",
     "build:mcp": "npm run -w mcp build",
     "start:mcp": "npm run -w mcp start",

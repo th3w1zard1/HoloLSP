@@ -1,0 +1,92 @@
+# Source files and development dependencies
+**/.git
+**/.svn
+**/.hg
+**/CVS
+**/.DS_Store
+**/Thumbs.db
+/.history
+/out
+
+# Node.js dependencies
+node_modules/**
+client/node_modules/**
+server/node_modules/**
+mcp/node_modules/**
+
+# Build outputs (keep only the compiled 'out' directory)
+client/src/**
+server/src/**
+mcp/src/**
+server/test/**
+
+# TypeScript configuration and build files
+**/tsconfig.json
+**/tsconfig.*.json
+**/tsconfig.tsbuildinfo
+**/*.tsbuildinfo
+
+# Package files
+**/package-lock.json
+**/.npmignore
+
+# Development configuration
+.vscode/**
+.cursorignore
+.cursorrules*
+.editorconfig
+
+# Documentation and examples (keep only essential ones)
+examples/**
+scripts/**
+vendor/**
+
+# History and backup files
+.history/**
+**/*.bak
+**/*.tmp
+**/*.swp
+
+# Test files
+**/test/**
+**/*.test.js
+**/*.test.ts
+**/*.spec.js
+**/*.spec.ts
+
+# Linting and formatting
+**/.eslintrc*
+**/.prettierrc*
+**/eslint.config.*
+
+# Environment files
+**/.env
+**/.env.*
+
+# Log files
+**/npm-debug.log*
+**/yarn-debug.log*
+**/yarn-error.log*
+**/lerna-debug.log*
+
+# Build outputs we don't need
+output/**
+
+# MCP specific files (not needed for VS Code extension)
+mcp/**
+
+# Python files (vendor dependencies)
+**/*.py
+**/*.pyc
+**/__pycache__/**
+
+# Only include what's necessary for the extension to work
+!out/**
+!client/out/**
+!server/out/**
+!syntaxes/**
+!language-configuration.json
+!package.json
+!README.md
+!LICENSE
+!GAME_VERSION_SUPPORT.md

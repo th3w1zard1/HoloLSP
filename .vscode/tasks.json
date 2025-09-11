@@ -2,6 +2,96 @@
   "version": "2.0.0",
   "tasks": [
     {
+      "label": "Install All Dependencies",
+      "type": "shell",
+      "command": "npm",
+      "args": ["install"],
+      "group": "build",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared",
+        "showReuseMessage": true,
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Compile",
+      "type": "npm",
+      "script": "compile",
+      "group": "build",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared",
+        "showReuseMessage": true,
+        "clear": false
+      },
+      "problemMatcher": ["$tsc"]
+    },
+    {
+      "label": "Create Output Directory",
+      "type": "shell",
+      "command": "mkdir",
+      "args": ["-p", "${workspaceFolder}/output"],
+      "windows": {
+        "command": "powershell",
+        "args": ["-Command", "New-Item -ItemType Directory -Force -Path '${workspaceFolder}/output'"]
+      },
+      "group": "build",
+      "presentation": {
+        "echo": true,
+        "reveal": "silent",
+        "focus": false,
+        "panel": "shared",
+        "showReuseMessage": true,
+        "clear": false
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Package Extension",
+      "type": "shell",
+      "command": "npx",
+      "args": ["@vscode/vsce", "package", "-o", "${workspaceFolder}/output/holo-lsp-1.0.0.vsix"],
+      "group": "build",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared",
+        "showReuseMessage": true,
+        "clear": false
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Build Extension",
+      "dependsOrder": "sequence",
+      "dependsOn": [
+        "Install All Dependencies",
+        "Compile",
+        "Create Output Directory",
+        "Package Extension"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": true,
+        "panel": "shared",
+        "showReuseMessage": true,
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
       "label": "npm: compile",
       "type": "npm",
       "script": "compile",
@@ -17,10 +107,7 @@
       "label": "npm: watch",
       "type": "npm",
       "script": "watch",
-      "group": {
-        "kind": "build",
-        "isDefault": true
-      },
+      "group": "build",
       "isBackground": true,
       "presentation": {
         "panel": "shared",
