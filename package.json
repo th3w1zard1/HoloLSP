@@ -140,14 +140,13 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
+    "vscode:prepublish": "npm run compile && npm run fix-workspace-junctions",
+    "fix-workspace-junctions": "node -e \"const fs=require('fs');const path=require('path');[['holo-lsp-client','client'],['holo-lsp-server','server']].forEach(([pkg,dir])=>{const src=path.join('node_modules',pkg);if(fs.existsSync(src)){fs.rmSync(src,{recursive:true,force:true});fs.cpSync(dir,src,{recursive:true});}})\"",
+    "package": "npx @vscode/vsce package --no-dependencies -o output/holo-lsp-1.0.0.vsix",
     "clean": "tsc -b --clean",
     "compile": "npm run clean && tsc -b",
     "watch": "tsc -b -w",
-    "build:tests": "npm run -w server build:tests",
-    "build:mcp": "npm run -w mcp build",
-    "start:mcp": "npm run -w mcp start",
-    "inspect:mcp": "npm run -w mcp inspector"
+    "build:tests": "npm run -w server build:tests"
   },
   "devDependencies": {
     "@types/node": "^20.5.7",
@@ -163,7 +162,6 @@
   },
   "workspaces": [
     "client",
-    "server",
-    "mcp"
+    "server"
   ]
 }

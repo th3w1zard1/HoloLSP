@@ -6,10 +6,6 @@
 **/.DS_Store
 **/Thumbs.db
 /.history
-/out
-
-# Node.js dependencies (do NOT exclude production deps; vsce handles pruning dev deps)
-# Keep node_modules included so runtime dependencies are packaged
 
 # Build outputs (exclude sources and tests; compiled 'out' is re-included below)
 client/src/**
@@ -49,6 +45,8 @@ vendor/**
 **/*.test.ts
 **/*.spec.js
 **/*.spec.ts
+client/test.ts
+client/test.js
 
 # Linting and formatting
 **/.eslintrc*
@@ -67,6 +65,9 @@ vendor/**
 
 # Build outputs we don't need
 output/**
+
+# Package lock files (reduce file count)
+**/package-lock.json
 
 # MCP specific files (not needed for VS Code extension)
 mcp/**
