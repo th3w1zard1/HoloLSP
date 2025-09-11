@@ -134,3 +134,11 @@ tramp
 test-files/
 *.test.nss
 .history/
+*.js
+*.map
+*.d.ts
+*.d.ts.map
+*.js.map
+output/
+mcp/
+*.spec.ts

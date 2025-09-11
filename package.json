@@ -9,6 +9,10 @@
     "Programming Languages",
     "Other"
   ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/th3w1zard1/HoloLSP"
+  },
   "engines": {
     "vscode": "^1.75.0"
   },
@@ -58,16 +62,95 @@
           "description": "Traces the communication between VS Code and the language server."
         }
       }
+    },
+    "debuggers": [
+      {
+        "type": "nwscript",
+        "label": "NWScript Debugger",
+        "languages": [
+          "nwscript"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "required": [
+              "program"
+            ],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "Path to the NWScript file to debug",
+                "default": "${file}"
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "description": "Automatically stop after launch",
+                "default": true
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "nwscript",
+            "request": "launch",
+            "name": "Debug NWScript",
+            "program": "${file}",
+            "stopOnEntry": true
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "NWScript: Debug Script",
+            "description": "Debug a NWScript file",
+            "body": {
+              "type": "nwscript",
+              "request": "launch",
+              "name": "${1:Debug NWScript}",
+              "program": "${2:${file}}",
+              "stopOnEntry": {
+                "type": "boolean",
+                "description": "Automatically stop after launch",
+                "default": true
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "commands": [
+      {
+        "command": "nwscript.startDebugging",
+        "title": "Start Debugging",
+        "category": "NWScript"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "when": "resourceLangId == nwscript || resourceExtname == .nss",
+          "command": "nwscript.startDebugging",
+          "group": "navigation"
+        }
+      ]
     }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -b",
     "watch": "tsc -b -w",
-    "postinstall": "cd client && npm install && cd ../server && npm install && cd .."
+    "postinstall": "cd client && npm install && cd ../server && npm install && cd ../mcp && npm install && cd ..",
+    "build:tests": "npm run -w server build:tests",
+    "build:mcp": "npm run -w mcp build",
+    "start:mcp": "npm run -w mcp start",
+    "inspect:mcp": "npm run -w mcp inspector"
   },
   "devDependencies": {
     "@types/node": "^20.5.7",
     "typescript": "^5.2.2"
-  }
+  },
+  "workspaces": [
+    "client",
+    "server",
+    "mcp"
+  ]
 }

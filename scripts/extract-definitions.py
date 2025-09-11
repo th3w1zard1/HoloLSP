@@ -2,11 +2,13 @@
 """
 Extract KOTOR/TSL constants and functions from PyKotor scriptdefs.py
 and generate TypeScript definitions.
+
+This script was used to generate the kotor-definitions.ts file in early stages to prevent tedious rewriting of already-existing PyKotor definitions.
+The current state of kotor-definitions.ts has been fine tuned and refactored to be more readable and maintainable.
 """
 from __future__ import annotations
 
 import ast
-import os
 import sys
 from pathlib import Path
 from typing import Any

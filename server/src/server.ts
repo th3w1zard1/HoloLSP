@@ -1,35 +1,505 @@
+import { TextDocument } from "vscode-languageserver-textdocument";
 import {
   CompletionItem,
-  CompletionItemKind,
   createConnection,
   Diagnostic,
   DiagnosticSeverity,
+  DidChangeConfigurationNotification,
+  DocumentSymbol,
   Hover,
   InitializeParams,
   InitializeResult,
+  Location,
   MarkupKind,
   ParameterInformation,
   ProposedFeatures,
   SignatureHelp,
   SignatureInformation,
+  SymbolKind,
   TextDocumentPositionParams,
   TextDocuments,
-  TextDocumentSyncKind
+  TextDocumentSyncKind,
+  WorkspaceSymbol
 } from "vscode-languageserver/node";
-
-import { TextDocument } from "vscode-languageserver-textdocument";
+import { CompletionProvider } from "./completion-provider";
+import { DiagnosticProvider } from "./diagnostic-provider";
+import { GameVersionDetector } from "./game-version-detector";
+import { NWScriptInterpreter } from "./interpreter";
 import {
+  cleanFunctionDescription,
   findConstant,
   findFunction,
   KOTOR_CONSTANTS,
   KOTOR_FUNCTIONS,
-  KOTOR_KEYWORDS,
-  KOTOR_TYPES,
+  NWSCRIPT_KEYWORDS,
+  NWSCRIPT_TYPES,
   NWScriptConstant,
   NWScriptFunction,
+  NWScriptParameter,
   NWScriptType
 } from "./kotor-definitions";
+import { KOTOR_LIBRARY, TSL_LIBRARY } from "./kotor-scriptlib";
+import { FunctionDeclaration, VariableDeclaration } from "./nwscript-ast";
+import { NWScriptParser } from "./nwscript-parser";
+import { SemanticAnalyzer } from "./semantic-analyzer";
+import { ScopeType } from "./variable-tracker";
 
+// Alias/synonym functions seen in community scripts
+const FUNCTION_ALIASES: Record<string, string> = {
+  // Map common NWN naming to KOTOR naming
+  GetGlobalInt: 'GetGlobalNumber',
+  SetGlobalInt: 'SetGlobalNumber',
+  ClearGlobalInt: 'SetGlobalNumber' // clearing -> setting to 0, but we only use this to suppress diagnostics
+};
+
+// Include-aware scriptlib scanning (KOTOR + TSL)
+type IncludeScanResult = {
+  functions: (NWScriptFunction & { location?: { line: number; character: number } })[];
+  constants: { [key: string]: any };
+  constantMeta: { [name: string]: { line: number; character: number } };
+};
+
+// Enhanced include tracking for C++-style functionality
+interface IncludeInfo {
+  name: string;
+  line: number;
+  character: number;
+  exists: boolean;
+  resolvedPath?: string;
+}
+
+interface IncludeDependencyGraph {
+  includes: Map<string, IncludeInfo[]>; // file -> includes it contains
+  dependents: Map<string, Set<string>>; // file -> files that depend on it
+  circularDeps: string[][]; // detected circular dependency chains
+}
+
+const includeCache: Map<string, IncludeScanResult> = new Map();
+
+// ---------------------- NEW GLOBAL SCRIPTLIB LOADING ----------------------
+// Parse the *entire* bundled script libraries once at start-up so that
+// commonly-used helper includes like k_inc_generic are always recognised,
+// even when the current document hasn’t explicitly included them.
+interface GlobalScriptlib {
+  functions: NWScriptFunction[];
+  constants: { [key: string]: any };
+}
+
+const GLOBAL_SCRIPTLIB: GlobalScriptlib = (() => {
+  const agg: GlobalScriptlib = { functions: [], constants: {} };
+  const visited = new Set<string>();
+  // meta stores for quick definition lookup
+  const addFunc = (f: NWScriptFunction & { location?: { line: number; character: number } }) => {
+    if (!agg.functions.find(x => x.name === f.name)) agg.functions.push(f);
+  };
+  const addConst = (name: string, value: any) => {
+    if (!(name in agg.constants)) agg.constants[name] = value;
+  };
+
+  const loadFromLibrary = (lib: Record<string, Uint8Array>) => {
+    Object.keys(lib).forEach(name => {
+      if (visited.has(name)) return;
+      visited.add(name);
+      try {
+        const decoded = new TextDecoder('utf-8').decode(lib[name]!);
+        const parsed = parseScriptlib(decoded, name);
+        parsed.functions.forEach(f => addFunc(f));
+        Object.keys(parsed.constants).forEach(k => addConst(k, parsed.constants[k]));
+      } catch {
+        // ignore decoding errors – individual includes may be binary placeholders
+      }
+    });
+  };
+
+  loadFromLibrary(KOTOR_LIBRARY as any);
+  loadFromLibrary(TSL_LIBRARY as any);
+  return agg;
+})();
+
+// --------------------------------------------------------------------------
+
+function decodeInclude(name: string): string | null {
+  const libBuf: Uint8Array | undefined = (KOTOR_LIBRARY as any)[name] || (TSL_LIBRARY as any)[name];
+  if (!libBuf) return null;
+  try {
+    return new TextDecoder('utf-8').decode(libBuf);
+  } catch {
+    try {
+      // Fallback simple decoding
+      let s = '';
+      for (let i = 0; i < libBuf.length; i++) s += String.fromCharCode(libBuf[i]!);
+      return s;
+    } catch {
+      return null;
+    }
+  }
+}
+
+function extractIncludes(source: string): string[] {
+  const result: string[] = [];
+  const includeRegex = /^\s*#include\s+"([A-Za-z0-9_]+)"/gm;
+  let m: RegExpExecArray | null;
+  while ((m = includeRegex.exec(source)) !== null) {
+    if (m[1] && !result.includes(m[1])) result.push(m[1]);
+  }
+  return result;
+}
+
+// Enhanced include extraction with location tracking
+function extractIncludesWithLocation(source: string): IncludeInfo[] {
+  const result: IncludeInfo[] = [];
+  const includeRegex = /^\s*#include\s+"([A-Za-z0-9_]+)"/gm;
+  let m: RegExpExecArray | null;
+  
+  while ((m = includeRegex.exec(source)) !== null) {
+    if (m[1]) {
+      const includeName = m[1];
+      
+      // Calculate line and character position
+      const beforeMatch = source.substring(0, m.index);
+      const lineNumber = beforeMatch.split('\n').length - 1;
+      const lineStart = beforeMatch.lastIndexOf('\n') + 1;
+      const character = m.index - lineStart;
+      
+      // Check if include exists
+      const exists = decodeInclude(includeName) !== null;
+      
+      // Avoid duplicates in the same file
+      const existingInclude = result.find(inc => inc.name === includeName);
+      if (!existingInclude) {
+        result.push({
+          name: includeName,
+          line: lineNumber,
+          character: character,
+          exists: exists,
+          resolvedPath: exists ? `hololsp:/kotor/${includeName}.nss` : undefined
+        });
+      }
+    }
+  }
+  
+  return result;
+}
+
+function sanitizeForParsing(source: string): string {
+  // Remove strings and comments to avoid brace miscounts
+  let out = "";
+  let inBlock = false;
+  let inString = false;
+  let stringChar = '';
+  for (let i = 0; i < source.length; i++) {
+    const ch = source[i];
+    const next = i + 1 < source.length ? source[i + 1] : '';
+
+    if (inBlock) {
+      if (ch === '*' && next === '/') {
+        inBlock = false; i++; out += '  '; continue;
+      }
+      out += ' ';
+      continue;
+    }
+
+    if (inString) {
+      out += ' ';
+      if (ch === stringChar && source[i - 1] !== '\\') {
+        inString = false;
+        stringChar = '';
+      }
+      continue;
+    }
+
+    if (ch === '/' && next === '*') { inBlock = true; i++; out += '  '; continue; }
+    if (ch === '/' && next === '/') { // line comment
+      // skip to end of line
+      while (i < source.length && source[i] !== '\n') { out += ' '; i++; }
+      i--; // outer for will increment
+      continue;
+    }
+    if (ch === '"' || ch === "'") { inString = true; stringChar = ch; out += ' '; continue; }
+    out += ch;
+  }
+  return out;
+}
+
+function parseScriptlib(source: string, includeName: string): IncludeScanResult {
+  const cached = includeCache.get(includeName);
+  if (cached) return cached;
+
+  const decoded = source;
+  const sanitized = sanitizeForParsing(decoded);
+
+  // Track brace depth to identify global scope
+  const globals: { lines: string[] } = { lines: [] };
+  {
+    const lines = sanitized.split('\n');
+    let depth = 0;
+    for (const line of lines) {
+      const open = (line.match(/\{/g) || []).length;
+      const close = (line.match(/\}/g) || []).length;
+      if (depth === 0) globals.lines.push(line);
+      depth += open;
+      depth -= close;
+      if (depth < 0) depth = 0;
+    }
+  }
+
+  const globalSource = globals.lines.join('\n');
+
+  // Parse functions (prototypes and definitions)
+  const functions: (NWScriptFunction & { location?: { line: number; character: number } })[] = [];
+  const seenFunc = new Set<string>();
+  const funcRegex = /^(?:\s*)(void|int|float|string|object|vector|location)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*(?:;|\{)/gm;
+  // Run on full sanitized source to compute positions reliably
+  let fm: RegExpExecArray | null;
+  while ((fm = funcRegex.exec(sanitized)) !== null) {
+    const returnType = fm[1];
+    const name = fm[2];
+    const paramsStr = fm[3] || '';
+    if (seenFunc.has(name!)) continue;
+    const parameters: NWScriptParameter[] = [];
+    if (paramsStr.trim().length > 0) {
+      const parts = paramsStr.split(',');
+      for (const raw of parts) {
+        const part = raw.trim();
+        const pm = part.match(/^(int|float|string|object|vector|location)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:=\s*([^,]+))?$/);
+        if (pm) {
+          parameters.push({ name: pm[2]!, type: pm[1]!, defaultValue: pm[3]?.trim() });
+        }
+      }
+    }
+    // Compute line/character from match.index in sanitized (same length as decoded)
+    const absoluteIndex = fm.index || 0;
+    const pre = decoded.substring(0, absoluteIndex);
+    const line = pre.split('\n').length - 1;
+    const lastNl = pre.lastIndexOf('\n');
+    const character = lastNl === -1 ? absoluteIndex : absoluteIndex - (lastNl + 1);
+    functions.push({ name: name!, returnType: returnType!, parameters, description: `${name} from ${includeName}`, category: 'scriptlib', includeFile: includeName, location: { line, character } });
+    seenFunc.add(name!);
+  }
+
+  // Parse constants at global scope
+  const constants: { [key: string]: any } = {};
+  const constantMeta: { [name: string]: { line: number; character: number } } = {};
+  const constRegex = /^(?:\s*)(int|float|string)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([^;]+);/gm;
+  let cm: RegExpExecArray | null;
+  while ((cm = constRegex.exec(sanitized)) !== null) {
+    const type = cm[1];
+    const name = cm[2];
+    let raw = (cm[3] || '').trim();
+    // Basic literal parsing
+    if (type === 'int') {
+      const intVal = parseInt(raw, 10);
+      if (!Number.isNaN(intVal)) constants[name!] = intVal;
+    } else if (type === 'float') {
+      const floatVal = parseFloat(raw);
+      if (!Number.isNaN(floatVal)) constants[name!] = floatVal;
+    } else if (type === 'string') {
+      constants[name!] = raw.replace(/^[\'"]|[\'"]$/g, '');
+    }
+    // Position
+    const absoluteIndex = cm.index || 0;
+    const pre = decoded.substring(0, absoluteIndex);
+    const line = pre.split('\n').length - 1;
+    const lastNl = pre.lastIndexOf('\n');
+    const character = lastNl === -1 ? absoluteIndex : absoluteIndex - (lastNl + 1);
+    constantMeta[name!] = { line, character };
+  }
+
+  const result: IncludeScanResult = { functions, constants, constantMeta };
+  includeCache.set(includeName, result);
+  return result;
+}
+
+function collectIncludesRecursively(rootIncludes: string[], visited: Set<string>): IncludeScanResult {
+  const agg: IncludeScanResult = { functions: [], constants: {}, constantMeta: {} };
+  const queue: string[] = [...rootIncludes];
+  while (queue.length > 0) {
+    const name = queue.shift()!;
+    if (!name || visited.has(name)) continue;
+    visited.add(name);
+    const text = decodeInclude(name);
+    if (!text) continue;
+    const parsed = parseScriptlib(text, name);
+    // Merge
+    parsed.functions.forEach(f => {
+      if (!agg.functions.find(x => x.name === f.name)) agg.functions.push(f);
+    });
+    Object.keys(parsed.constants).forEach(k => {
+      if (!(k in agg.constants)) agg.constants[k] = parsed.constants[k];
+    });
+    Object.keys(parsed.constantMeta).forEach(k => {
+      const meta = parsed.constantMeta[k];
+      if (meta && !(k in agg.constantMeta)) agg.constantMeta[k] = meta;
+    });
+    // Follow nested includes
+    const nested = extractIncludes(text);
+    nested.forEach(n => { if (!visited.has(n)) queue.push(n); });
+  }
+  return agg;
+}
+
+// Enhanced circular dependency detection with path tracking
+function detectCircularDependencies(rootIncludes: string[]): IncludeDependencyGraph {
+  const graph: IncludeDependencyGraph = {
+    includes: new Map(),
+    dependents: new Map(),
+    circularDeps: []
+  };
+  
+  const visited = new Set<string>();
+  const recursionStack = new Set<string>();
+  const currentPath: string[] = [];
+  
+  function visitInclude(includeName: string): void {
+    if (recursionStack.has(includeName)) {
+      // Circular dependency detected!
+      const circleStart = currentPath.indexOf(includeName);
+      const circle = currentPath.slice(circleStart).concat(includeName);
+      graph.circularDeps.push(circle);
+      return;
+    }
+    
+    if (visited.has(includeName)) return;
+    
+    visited.add(includeName);
+    recursionStack.add(includeName);
+    currentPath.push(includeName);
+    
+    const text = decodeInclude(includeName);
+    if (text) {
+      const includeInfos = extractIncludesWithLocation(text);
+      graph.includes.set(includeName, includeInfos);
+      
+      // Track dependents
+      includeInfos.forEach(inc => {
+        if (!graph.dependents.has(inc.name)) {
+          graph.dependents.set(inc.name, new Set());
+        }
+        graph.dependents.get(inc.name)!.add(includeName);
+        
+        // Recursively visit nested includes
+        visitInclude(inc.name);
+      });
+    }
+    
+    currentPath.pop();
+    recursionStack.delete(includeName);
+  }
+  
+  // Start DFS from root includes
+  rootIncludes.forEach(visitInclude);
+  
+  return graph;
+}
+
+// Generate include-related diagnostics
+function generateIncludeDiagnostics(source: string, uri: string): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  const includeInfos = extractIncludesWithLocation(source);
+  const rootIncludes = includeInfos.map(inc => inc.name);
+  
+  // Check for missing includes
+  includeInfos.forEach(inc => {
+    if (!inc.exists) {
+      diagnostics.push({
+        severity: DiagnosticSeverity.Error,
+        range: {
+          start: { line: inc.line, character: inc.character },
+          end: { line: inc.line, character: inc.character + inc.name.length + 10 } // +10 for #include ""
+        },
+        message: `Include file '${inc.name}' not found`,
+        source: 'HoloLSP',
+        code: 'missing-include'
+      });
+    }
+  });
+  
+  // Check for circular dependencies
+  const depGraph = detectCircularDependencies(rootIncludes);
+  depGraph.circularDeps.forEach(circle => {
+    const circleStr = circle.join(' → ');
+    // Find the include that starts this circle in the current file
+    const firstInclude = includeInfos.find(inc => inc.name === circle[0]);
+    if (firstInclude) {
+      diagnostics.push({
+        severity: DiagnosticSeverity.Warning,
+        range: {
+          start: { line: firstInclude.line, character: firstInclude.character },
+          end: { line: firstInclude.line, character: firstInclude.character + firstInclude.name.length + 10 }
+        },
+        message: `Circular dependency detected: ${circleStr}`,
+        source: 'HoloLSP',
+        code: 'circular-include'
+      });
+    }
+  });
+  
+  // Check for duplicate includes in the same file
+  const seen = new Set<string>();
+  const duplicates = new Set<string>();
+  includeInfos.forEach(inc => {
+    if (seen.has(inc.name)) {
+      duplicates.add(inc.name);
+    } else {
+      seen.add(inc.name);
+    }
+  });
+  
+  includeInfos.forEach(inc => {
+    if (duplicates.has(inc.name)) {
+      diagnostics.push({
+        severity: DiagnosticSeverity.Warning,
+        range: {
+          start: { line: inc.line, character: inc.character },
+          end: { line: inc.line, character: inc.character + inc.name.length + 10 }
+        },
+        message: `Duplicate include: '${inc.name}' is already included in this file`,
+        source: 'HoloLSP',
+        code: 'duplicate-include'
+      });
+    }
+  });
+  
+  return diagnostics;
+}
+
+function getAvailableConstants(text: string): { [key: string]: any } {
+  try {
+    const includes = extractIncludes(text);
+    if (includes.length === 0) return {};
+    const visited = new Set<string>();
+    const agg = collectIncludesRecursively(includes, visited);
+    return agg.constants;
+  } catch {
+    return {};
+  }
+}
+
+function getAvailableFunctions(text: string): NWScriptFunction[] {
+  try {
+    const includes = extractIncludes(text);
+    if (includes.length === 0) return [];
+    const visited = new Set<string>();
+    const agg = collectIncludesRecursively(includes, visited);
+    return agg.functions;
+  } catch {
+    return [];
+  }
+
+  // Helper: resolve function by name across core, scriptlib and aliases
+  function resolveFunctionByName(name: string, sourceText: string): NWScriptFunction | undefined {
+    let func = findFunction(name);
+    if (func) return func;
+    const documentScriptlibFunctions = getAvailableFunctions(sourceText);
+    func = documentScriptlibFunctions.find(f => f.name === name);
+    if (func) return func;
+    const alias = FUNCTION_ALIASES[name];
+    if (alias) {
+      func = findFunction(alias) || documentScriptlibFunctions.find(f => f.name === alias);
+    }
+    return func;
+  }
+}
 // Create a connection for the server, using Node's IPC as a transport.
 // Also include all preview / proposed LSP features.
 const connection = createConnection(ProposedFeatures.all);
@@ -37,13 +507,17 @@ const connection = createConnection(ProposedFeatures.all);
 // Create a simple text document manager.
 const documents: TextDocuments<TextDocument> = new TextDocuments(TextDocument);
 
+// Using connection.console for IDE-agnostic logging
+
 // Settings interface
 interface HoloLSPSettings {
   maxNumberOfProblems: number;
 }
 
 // Default settings
-const defaultSettings: HoloLSPSettings = { maxNumberOfProblems: 1000 };
+const defaultSettings: HoloLSPSettings = { 
+  maxNumberOfProblems: 1000
+};
 let globalSettings: HoloLSPSettings = defaultSettings;
 
 // Cache for settings of all open documents
@@ -52,21 +526,29 @@ let documentSettings: Map<string, Thenable<HoloLSPSettings>> = new Map();
 // Language data storage (using imported KOTOR definitions)
 const constants: NWScriptConstant[] = KOTOR_CONSTANTS;
 const functions: NWScriptFunction[] = KOTOR_FUNCTIONS;
-const types: NWScriptType[] = KOTOR_TYPES;
+const types: NWScriptType[] = NWSCRIPT_TYPES;
 
 // Initialize language data (now using imported KOTOR definitions)
 async function initializeLanguageData() {
   try {
-    connection.console.log(`Loaded ${constants.length} KOTOR constants`);
-    connection.console.log(`Loaded ${functions.length} KOTOR functions`);
-    connection.console.log(`Loaded ${types.length} KOTOR types`);
-    connection.console.log("HoloLSP language data initialized successfully with KOTOR definitions");
+    connection.console.info(`[LanguageData] Loaded ${constants.length} KOTOR constants`);
+    connection.console.info(`[LanguageData] Loaded ${functions.length} KOTOR functions`);
+    connection.console.info(`[LanguageData] Loaded ${types.length} KOTOR types`);
+    connection.console.info("[LanguageData] HoloLSP language data initialized successfully with KOTOR definitions");
   } catch (error) {
-    connection.console.error(`Failed to initialize language data: ${error}`);
+    connection.console.error(`[LanguageData] Failed to initialize language data: ${error}`);
   }
 }
 
 connection.onInitialize((params: InitializeParams) => {
+  connection.console.info('[Initialize] Initializing HoloLSP server');
+  
+  // Check client capabilities
+  hasConfigurationCapability = !!(params.capabilities.workspace && params.capabilities.workspace.configuration);
+  hasWorkspaceFolderCapability = !!(params.capabilities.workspace && params.capabilities.workspace.workspaceFolders);
+
+  connection.console.log(`[Initialize] Client capabilities - Configuration: ${hasConfigurationCapability}, WorkspaceFolders: ${hasWorkspaceFolderCapability}`);
+
   const result: InitializeResult = {
     capabilities: {
       textDocumentSync: TextDocumentSyncKind.Incremental,
@@ -75,11 +557,40 @@ connection.onInitialize((params: InitializeParams) => {
         triggerCharacters: ['.', '(']
       },
       hoverProvider: true,
+      definitionProvider: true,
+      declarationProvider: true,
+      typeDefinitionProvider: true,
+      implementationProvider: true,
+      referencesProvider: true,
+      documentHighlightProvider: true,
+      documentSymbolProvider: true,
+      workspaceSymbolProvider: true,
       signatureHelpProvider: {
         triggerCharacters: ['(', ',']
+      },
+      renameProvider: {
+        prepareProvider: true
+      },
+      foldingRangeProvider: true,
+      codeActionProvider: true,
+      // Add debug capabilities
+      executeCommandProvider: {
+        commands: [
+          'nwscript.startDebugging',
+          'nwscript.setBreakpoint',
+          'nwscript.removeBreakpoint',
+          'nwscript.stepOver',
+          'nwscript.stepIn',
+          'nwscript.stepOut',
+          'nwscript.continue',
+          'nwscript.pause',
+          'nwscript.stop'
+        ]
       }
     },
   };
+
+  connection.console.log('[Initialize] Server capabilities configured');
 
   // Initialize language data
   initializeLanguageData();
@@ -88,11 +599,38 @@ connection.onInitialize((params: InitializeParams) => {
 });
 
 connection.onInitialized(() => {
-  connection.console.log("HoloLSP server initialized for KOTOR NWScript");
+  connection.console.info("[Initialize] HoloLSP server initialized for KOTOR NWScript");
+
+  // Initialize the interpreter
+  interpreter = new NWScriptInterpreter(connection, documents);
+  connection.console.info("[Initialize] NWScript interpreter initialized");
+
+  // Register debug request handlers
+  connection.onRequest('nwscript/debug/setBreakpoints', interpreter.handleSetBreakpoints.bind(interpreter));
+  connection.onRequest('nwscript/debug/start', interpreter.handleStart.bind(interpreter));
+  connection.onRequest('nwscript/debug/continue', interpreter.handleContinue.bind(interpreter));
+  connection.onRequest('nwscript/debug/next', interpreter.handleNext.bind(interpreter));
+  connection.onRequest('nwscript/debug/stepIn', interpreter.handleStepIn.bind(interpreter));
+  connection.onRequest('nwscript/debug/stepOut', interpreter.handleStepOut.bind(interpreter));
+  connection.onRequest('nwscript/debug/pause', interpreter.handlePause.bind(interpreter));
+  connection.onRequest('nwscript/debug/stackTrace', interpreter.handleStackTrace.bind(interpreter));
+  connection.onRequest('nwscript/debug/scopes', interpreter.handleScopes.bind(interpreter));
+  connection.onRequest('nwscript/debug/variables', interpreter.handleVariables.bind(interpreter));
+  connection.onRequest('nwscript/debug/evaluate', interpreter.handleEvaluate.bind(interpreter));
+  connection.onRequest('nwscript/debug/stop', interpreter.handleStop.bind(interpreter));
+  connection.console.log("[Initialize] Debug request handlers registered");
+
+  // Register capability if client supports configuration
+  if (hasConfigurationCapability) {
+    connection.client.register(DidChangeConfigurationNotification.type);
+    connection.console.log("[Initialize] Configuration change notifications registered");
+  }
 });
 
 // Document settings management
 connection.onDidChangeConfiguration(change => {
+  connection.console.log('[Configuration] Configuration changed');
+  
   if (hasConfigurationCapability) {
     documentSettings.clear();
   } else {
@@ -100,10 +638,13 @@ connection.onDidChangeConfiguration(change => {
       (change.settings.holoLSP || defaultSettings)
     );
   }
+  
   documents.all().forEach(validateTextDocument);
 });
 
 let hasConfigurationCapability: boolean = false;
+let hasWorkspaceFolderCapability: boolean = false;
+let interpreter: NWScriptInterpreter;
 
 function getDocumentSettings(resource: string): Thenable<HoloLSPSettings> {
   if (!hasConfigurationCapability) {
@@ -126,16 +667,153 @@ documents.onDidClose(e => {
 
 // Validation
 documents.onDidChangeContent(change => {
+  // Update interpreter analysis for this document
+  const document = change.document;
+  const text = document.getText();
+  connection.console.log(`[DocumentChange] Document changed: ${document.uri} (${text.length} characters)`);
+  
+  // Check if game version comment is present
+  const gameVersionInfo = GameVersionDetector.detectGameVersion(text);
+  connection.console.log(`[DocumentChange] Game version: ${gameVersionInfo.version} (explicit: ${gameVersionInfo.hasExplicitVersion})`);
+  
+  interpreter.updateAnalysisForDocument(document.uri, text);
   validateTextDocument(change.document);
 });
 
 async function validateTextDocument(textDocument: TextDocument): Promise<void> {
+  const startTime = Date.now();
   const settings = await getDocumentSettings(textDocument.uri);
   const text = textDocument.getText();
+  let diagnostics: Diagnostic[] = [];
+
+  connection.console.log(`[Validation] Starting validation for: ${textDocument.uri}`);
+
+  try {
+    // Generate include-related diagnostics first
+    const includeDiagnostics = generateIncludeDiagnostics(text, textDocument.uri);
+    diagnostics.push(...includeDiagnostics);
+    
+    // Get include-aware functions and constants for semantic analysis
+    const scriptlibFunctions = getAvailableFunctions(text);
+    const scriptlibConstants = getAvailableConstants(text);
+
+    connection.console.log(`[Validation] Loaded ${scriptlibFunctions.length} scriptlib functions, ${Object.keys(scriptlibConstants).length} constants`);
+    connection.console.log(`[Validation] Found ${includeDiagnostics.length} include-related issues`);
+
+    // Parse the document using the NWScript parser with error recovery
+    const parseResult = NWScriptParser.parseWithErrors(text);
+    const ast = parseResult.program;
+    
+    // Add any parse errors as diagnostics
+    parseResult.errors.forEach(error => {
+      diagnostics.push({
+        severity: DiagnosticSeverity.Error,
+        range: {
+          start: { line: Math.max(0, error.location.line - 1), character: error.location.column },
+          end: { line: Math.max(0, error.location.line - 1), character: error.location.column + 1 }
+        },
+        message: error.message,
+        source: 'HoloLSP',
+        code: 'parse-error'
+      });
+    });
+
+    connection.console.log(`[Validation] Parsing ${textDocument.uri}: ${parseResult.errors.length === 0 ? 'success' : 'failed'}`);
+
+    // If parsing failed completely, fall back to basic validation
+    if (!ast && parseResult.errors.length === 0) {
+      connection.console.log("[Validation] No AST generated, falling back to basic validation");
+      const basicDiagnostics = performBasicValidation(text);
+      diagnostics.push(...basicDiagnostics);
+    }
+
+    // If we have a valid AST, perform comprehensive semantic analysis
+    if (ast) {
+      // Detect game version from source text
+      const gameVersionInfo = GameVersionDetector.detectGameVersion(text);
+      connection.console.log(`[Validation] Game version detected: ${gameVersionInfo.version} (explicit: ${gameVersionInfo.hasExplicitVersion ? 'yes' : 'no'})`);
+      
+      // Filter functions and constants based on detected game version
+      const gameFilteredFunctions = gameVersionInfo.version === 'kotor2' ? 
+                                   functions.filter(f => f.category !== 'kotor1-only') :
+                                   gameVersionInfo.version === 'kotor1' ?
+                                   functions.filter(f => f.category !== 'kotor2-only') :
+                                   functions;
+      
+      const gameFilteredConstants = gameVersionInfo.version === 'kotor2' ?
+                                   constants.filter(c => c.category !== 'kotor1-only') :
+                                   gameVersionInfo.version === 'kotor1' ?
+                                   constants.filter(c => c.category !== 'kotor2-only') :
+                                   constants;
+      
+      const analyzer = new SemanticAnalyzer(scriptlibFunctions, scriptlibConstants, gameVersionInfo.version);
+      const semanticErrors = analyzer.analyze(ast, text);
+      
+      // Use a diagnostic provider to improve error messages
+      const diagnosticProvider = new DiagnosticProvider(
+        [...gameFilteredFunctions, ...scriptlibFunctions], 
+        [
+          ...gameFilteredConstants,
+          ...Object.entries(scriptlibConstants).map(([name, value]) => ({
+            name,
+            type: typeof value === 'number' ? 'int' : 'string',
+            value,
+            description: 'Scriptlib constant',
+            category: 'scriptlib'
+          }))
+        ]
+      );
+      
+      const enhancedDiagnostics = diagnosticProvider.enhanceDiagnostics(semanticErrors);
+      
+      // Add contextual information
+      enhancedDiagnostics.forEach(diag => {
+        diagnosticProvider.addContextualInfo(diag, text);
+      });
+      
+      // Add game version warning if not specified
+      const versionWarning = GameVersionDetector.generateMissingVersionWarning(text);
+      if (versionWarning) {
+        enhancedDiagnostics.push({
+          severity: versionWarning.severity,
+          range: {
+            start: { line: versionWarning.range.start.line, character: versionWarning.range.start.column },
+            end: { line: versionWarning.range.end.line, character: versionWarning.range.end.column }
+          },
+          message: versionWarning.message,
+          source: 'HoloLSP',
+          code: versionWarning.code
+        });
+      }
+      
+      diagnostics.push(...enhancedDiagnostics);
+    }
+
+  } catch (error) {
+    // Fallback to basic validation if everything else fails
+    connection.console.error(`[Validation] Validation error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    const basicDiagnostics = performBasicValidation(text);
+    diagnostics = basicDiagnostics;
+  }
+
+  // Limit diagnostics to prevent overwhelming the user
+  const limitedDiagnostics = diagnostics.slice(0, settings.maxNumberOfProblems);
+  const duration = Date.now() - startTime;
+  
+  connection.console.log(`[Validation] Document validation: ${limitedDiagnostics.length} diagnostics`);
+  connection.console.log(`[Validation] Document validation duration: ${duration}ms`);
+  
+  connection.sendDiagnostics({ uri: textDocument.uri, diagnostics: limitedDiagnostics });
+}
+
+/**
+ * Fallback basic validation for when AST parsing fails
+ */
+function performBasicValidation(text: string): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
   const lines = text.split('\n');
 
-  // Track brace balance across the entire document
+  // Basic brace and parentheses balance checking
   let braceBalance = 0;
   let parenBalance = 0;
   let inBlockComment = false;
@@ -145,12 +823,13 @@ async function validateTextDocument(textDocument: TextDocument): Promise<void> {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (!line) continue;
-    const trimmedLine = line.trim();
 
-    // Skip empty lines
-    if (trimmedLine === '') continue;
+    // Preserve string state across lines; do not reset here
+    /*if (!line.trim().endsWith('\\')) {
+      inString = false;
+      stringChar = '';
+    }*/
 
-    // Process each character for better parsing
     for (let j = 0; j < line.length; j++) {
       const char = line[j];
       const prevChar = j > 0 ? line[j - 1] : '';
@@ -206,7 +885,8 @@ async function validateTextDocument(textDocument: TextDocument): Promise<void> {
               end: { line: i, character: j + 1 }
             },
             message: 'Unexpected closing brace - no matching opening brace',
-            source: 'HoloLSP'
+            source: 'HoloLSP',
+            code: 'unmatched-brace'
           });
           braceBalance = 0; // Reset to prevent cascade errors
         }
@@ -219,7 +899,8 @@ async function validateTextDocument(textDocument: TextDocument): Promise<void> {
               end: { line: i, character: j + 1 }
             },
             message: 'Unexpected closing parenthesis - no matching opening parenthesis',
-            source: 'HoloLSP'
+            source: 'HoloLSP',
+            code: 'unmatched-paren'
           });
           parenBalance = 0; // Reset to prevent cascade errors
         }
@@ -227,7 +908,7 @@ async function validateTextDocument(textDocument: TextDocument): Promise<void> {
     }
 
     // Check for unterminated strings
-    if (inString && !trimmedLine.endsWith('\\')) {
+    if (inString && !line.trim().endsWith('\\')) {
       diagnostics.push({
         severity: DiagnosticSeverity.Error,
         range: {
@@ -235,58 +916,10 @@ async function validateTextDocument(textDocument: TextDocument): Promise<void> {
           end: { line: i, character: line.length }
         },
         message: 'Unterminated string literal',
-        source: 'HoloLSP'
+        source: 'HoloLSP',
+        code: 'unterminated-string'
       });
       inString = false; // Reset for next line
-    }
-
-    // Check for undefined functions (improved check)
-    if (!inBlockComment && !inString) {
-      const functionCallRegex = /([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/g;
-      let match;
-      while ((match = functionCallRegex.exec(line)) !== null) {
-        const functionName = match[1];
-        if (!functionName) continue;
-        const isKeyword = ['if', 'while', 'for', 'switch', 'do', 'else', 'return'].includes(functionName);
-        const isKnownFunction = functions.some(f => f.name === functionName);
-        const isDataType = types.some(t => t.name === functionName);
-
-        if (!isKeyword && !isKnownFunction && !isDataType) {
-          diagnostics.push({
-            severity: DiagnosticSeverity.Warning,
-            range: {
-              start: { line: i, character: match.index },
-              end: { line: i, character: match.index + functionName.length }
-            },
-            message: `Unknown function '${functionName}' - it may not be defined in the current context`,
-            source: 'HoloLSP'
-          });
-        }
-      }
-    }
-
-    // Check for undefined constants/variables (basic check)
-    if (!inBlockComment && !inString) {
-      const identifierRegex = /\b([A-Z_][A-Z0-9_]{2,})\b/g;
-      let match;
-      while ((match = identifierRegex.exec(line)) !== null) {
-        const identifier = match[1];
-        if (!identifier) continue;
-        const isKnownConstant = constants.some(c => c.name === identifier);
-        const isKeyword = KOTOR_KEYWORDS.includes(identifier.toLowerCase());
-
-        if (!isKnownConstant && !isKeyword && identifier !== 'OBJECT_SELF' && identifier !== 'OBJECT_INVALID') {
-          diagnostics.push({
-            severity: DiagnosticSeverity.Information,
-            range: {
-              start: { line: i, character: match.index },
-              end: { line: i, character: match.index + identifier.length }
-            },
-            message: `Unknown constant or variable '${identifier}' - ensure it's defined`,
-            source: 'HoloLSP'
-          });
-        }
-      }
     }
   }
 
@@ -299,225 +932,102 @@ async function validateTextDocument(textDocument: TextDocument): Promise<void> {
         end: { line: lines.length - 1, character: lines[lines.length - 1]?.length || 0 }
       },
       message: `${braceBalance} unclosed brace(s) - missing closing brace(s)`,
-      source: 'HoloLSP'
+      source: 'HoloLSP',
+      code: 'unclosed-braces'
     });
   }
 
   if (parenBalance > 0) {
     diagnostics.push({
-      severity: DiagnosticSeverity.Warning,
+      severity: DiagnosticSeverity.Error,
       range: {
         start: { line: lines.length - 1, character: 0 },
         end: { line: lines.length - 1, character: lines[lines.length - 1]?.length || 0 }
       },
       message: `${parenBalance} unclosed parenthesis(es) - missing closing parenthesis(es)`,
-      source: 'HoloLSP'
+      source: 'HoloLSP',
+      code: 'unclosed-parens'
     });
   }
 
-  // Limit diagnostics to prevent overwhelming the user
-  const limitedDiagnostics = diagnostics.slice(0, settings.maxNumberOfProblems);
-  connection.sendDiagnostics({ uri: textDocument.uri, diagnostics: limitedDiagnostics });
+  return diagnostics;
 }
 
-// Completion provider with context awareness
+// Completion provider
 connection.onCompletion((params: TextDocumentPositionParams): CompletionItem[] => {
+  const startTime = Date.now();
   const document = documents.get(params.textDocument.uri);
   if (!document) {
+    connection.console.log(`[Completion] Completion requested for unknown document: ${params.textDocument.uri}`);
     return [];
   }
 
-  const text = document.getText();
-  const position = params.position;
-  const lines = text.split('\n');
+  connection.console.log(`[Completion] Completion requested at ${params.position.line}:${params.position.character} in ${params.textDocument.uri}`);
 
-  if (position.line >= lines.length) {
+  try {
+    const text = document.getText();
+    
+    // Detect game version for context-aware completions
+    const gameVersionInfo = GameVersionDetector.detectGameVersion(text);
+    
+    // Get include-aware functions and constants
+    const scriptlibFunctions = getAvailableFunctions(text);
+    const scriptlibConstants = getAvailableConstants(text);
+    
+    // Get game-specific functions and constants based on detected version
+    const gameFunctions = gameVersionInfo.version === 'kotor2' ? 
+                         [...functions.filter(f => f.category !== 'kotor1-only')] :
+                         gameVersionInfo.version === 'kotor1' ?
+                         [...functions.filter(f => f.category !== 'kotor2-only')] :
+                         [...functions];
+    
+    const gameConstants = gameVersionInfo.version === 'kotor2' ?
+                         [...constants.filter(c => c.category !== 'kotor1-only')] :
+                         gameVersionInfo.version === 'kotor1' ?
+                         [...constants.filter(c => c.category !== 'kotor2-only')] :
+                         [...constants];
+    
+    // Combine all available functions and constants
+    const allFunctions = [
+      ...gameFunctions,
+      ...scriptlibFunctions,
+      ...GLOBAL_SCRIPTLIB.functions
+    ];
+    
+    const allConstants = [
+      ...gameConstants,
+      ...Object.entries(scriptlibConstants).map(([name, value]) => ({
+        name,
+        type: typeof value === 'number' ? 'int' : 'string',
+        value,
+        description: 'Scriptlib constant',
+        category: 'scriptlib'
+      })),
+      ...Object.entries(GLOBAL_SCRIPTLIB.constants).map(([name, value]) => ({
+        name,
+        type: typeof value === 'number' ? 'int' : 'string',
+        value,
+        description: 'Global scriptlib constant',
+        category: 'scriptlib'
+      }))
+    ];
+
+    // Use the advanced completion provider
+    const completionProvider = new CompletionProvider(allFunctions, allConstants, types, NWSCRIPT_KEYWORDS);
+    const completions = completionProvider.provideCompletions(document, params.position);
+    
+    const duration = Date.now() - startTime;
+    connection.console.log(`[Completion] ${params.textDocument.uri}:${params.position.line}:${params.position.character}: ${completions.length} completions`);
+    connection.console.log(`[Completion] Completion duration: ${duration}ms`);
+    
+    return completions;
+    
+  } catch (error) {
+    connection.console.error(`[Completion] Completion error: ${error instanceof Error ? error.message : 'Unknown error'}`);
     return [];
   }
-
-  const line = lines[position.line];
-  if (!line) return [];
-  const beforeCursor = line.substring(0, position.character);
-  const completionItems: CompletionItem[] = [];
-
-  // Determine context for smarter completions
-  const context = analyzeCompletionContext(beforeCursor, lines, position.line);
-
-  // Add constants (filtered by context)
-  constants.forEach(constant => {
-    if (shouldIncludeConstant(constant, context)) {
-      completionItems.push({
-        label: constant.name,
-        kind: CompletionItemKind.Constant,
-        detail: `${constant.type} = ${constant.value}`,
-        documentation: {
-          kind: MarkupKind.Markdown,
-          value: `**${constant.name}** (${constant.type})\\n\\n${constant.description || `Constant of type ${constant.type}`}\\n\\n*Value:* \`${constant.value}\`${constant.category ? `\\n\\n*Category:* ${constant.category}` : ''}`
-        },
-        insertText: constant.name,
-        sortText: `1_${constant.category || 'other'}_${constant.name}` // Sort by category
-      });
-    }
-  });
-
-  // Add functions (with snippet support)
-  functions.forEach(func => {
-    if (shouldIncludeFunction(func, context)) {
-      const params = func.parameters.map(p =>
-        p.defaultValue ? `${p.type} ${p.name} = ${p.defaultValue}` : `${p.type} ${p.name}`
-      ).join(', ');
-
-      // Create snippet for function with parameters
-      let snippetText = func.name;
-      if (func.parameters.length > 0) {
-        const snippetParams = func.parameters.map((p, index) => {
-          const placeholder = p.defaultValue ? `\${${index + 1}:${p.defaultValue}}` : `\${${index + 1}:${p.name}}`;
-          return placeholder;
-        }).join(', ');
-        snippetText = `${func.name}(${snippetParams})`;
-      } else {
-        snippetText = `${func.name}()`;
-      }
-
-      completionItems.push({
-        label: func.name,
-        kind: CompletionItemKind.Function,
-        detail: `${func.returnType} ${func.name}(${params})`,
-        documentation: {
-          kind: MarkupKind.Markdown,
-          value: `**${func.name}** (${func.returnType})\\n\\n\`\`\`nwscript\\n${func.returnType} ${func.name}(${params})\\n\`\`\`\\n\\n${func.description || `Function returning ${func.returnType}`}${func.category ? `\\n\\n*Category:* ${func.category}` : ''}`
-        },
-        insertText: snippetText,
-        insertTextFormat: 2, // Snippet format
-        sortText: `2_${func.category || 'other'}_${func.name}`
-      });
-    }
-  });
-
-  // Add types (when appropriate)
-  if (context.expectingType) {
-    types.forEach(type => {
-      completionItems.push({
-        label: type.name,
-        kind: CompletionItemKind.TypeParameter,
-        detail: `Type: ${type.name}`,
-        documentation: type.description || `Data type ${type.name}`,
-        insertText: type.name,
-        sortText: `0_${type.name}`
-      });
-    });
-  }
-
-  // Add keywords (context-sensitive)
-  KOTOR_KEYWORDS.forEach(keyword => {
-    if (shouldIncludeKeyword(keyword, context)) {
-      completionItems.push({
-        label: keyword,
-        kind: CompletionItemKind.Keyword,
-        detail: `Keyword: ${keyword}`,
-        insertText: keyword,
-        sortText: `3_${keyword}`
-      });
-    }
-  });
-
-  // Add context-specific suggestions
-  if (context.inFunctionCall && context.functionName) {
-    // Add parameter hints or related constants
-    const func = findFunction(context.functionName);
-    if (func && context.parameterIndex !== undefined && context.parameterIndex < func.parameters.length) {
-      const param = func.parameters[context.parameterIndex];
-      if (param) {
-        // Suggest constants that match the parameter type
-        constants.forEach(constant => {
-          if (constant.type === param.type || (param.type === 'int' && constant.type === 'int')) {
-            completionItems.push({
-              label: constant.name,
-              kind: CompletionItemKind.Value,
-              detail: `${constant.type} = ${constant.value} (for ${param.name})`,
-              documentation: `Suggested for parameter '${param.name}' of type ${param.type}`,
-              insertText: constant.name,
-              sortText: `0_param_${constant.name}`
-            });
-          }
-        });
-      }
-    }
-  }
-
-  return completionItems;
 });
 
-// Helper function to analyze completion context
-function analyzeCompletionContext(beforeCursor: string, lines: string[], currentLine: number): any {
-  const context: any = {
-    expectingType: false,
-    inFunctionCall: false,
-    functionName: null,
-    parameterIndex: null,
-    afterDot: false,
-    inString: false,
-    inComment: false
-  };
-
-  // Check if we're expecting a type declaration
-  const typeKeywords = ['int', 'float', 'string', 'object', 'vector', 'location', 'void'];
-  const beforeWords = beforeCursor.trim().split(/\\s+/);
-  const lastWord = beforeWords[beforeWords.length - 1];
-
-  if (beforeWords.length > 0) {
-    const secondLastWord = beforeWords[beforeWords.length - 2];
-    if (secondLastWord && typeKeywords.includes(secondLastWord)) {
-      context.expectingType = false; // We're after a type, expecting variable name
-    } else if (beforeCursor.match(/^\\s*(int|float|string|object|vector|location|void)?\\s*$/)) {
-      context.expectingType = true;
-    }
-  }
-
-  // Check if we're in a function call
-  const functionCallMatch = beforeCursor.match(/([a-zA-Z_][a-zA-Z0-9_]*)\s*\([^)]*$/);
-  if (functionCallMatch && functionCallMatch[1]) {
-    context.inFunctionCall = true;
-    context.functionName = functionCallMatch[1];
-
-    // Count parameters to determine which parameter we're completing
-    const afterFunctionName = beforeCursor.substring(beforeCursor.lastIndexOf(context.functionName) + context.functionName.length);
-    const openParenIndex = afterFunctionName.indexOf('(');
-    if (openParenIndex !== -1) {
-      const insideParens = afterFunctionName.substring(openParenIndex + 1);
-      context.parameterIndex = (insideParens.match(/,/g) || []).length;
-    }
-  }
-
-  // Check if we're after a dot (object property access)
-  context.afterDot = beforeCursor.endsWith('.');
-
-  // Check if we're in a string or comment (simplified check)
-  const lineUpToCursor = beforeCursor;
-  const stringMatches = lineUpToCursor.match(/"/g);
-  context.inString = stringMatches && stringMatches.length % 2 === 1;
-  context.inComment = lineUpToCursor.includes('//') || lineUpToCursor.includes('/*');
-
-  return context;
-}
-
-// Helper functions to determine what to include in completions
-function shouldIncludeConstant(constant: NWScriptConstant, context: any): boolean {
-  if (context.inString || context.inComment) return false;
-  return true;
-}
-
-function shouldIncludeFunction(func: NWScriptFunction, context: any): boolean {
-  if (context.inString || context.inComment) return false;
-  if (context.expectingType && func.returnType !== 'void') return true;
-  return !context.expectingType;
-}
-
-function shouldIncludeKeyword(keyword: string, context: any): boolean {
-  if (context.inString || context.inComment) return false;
-  if (context.inFunctionCall) return false; // Don't suggest keywords inside function calls
-  return true;
-}
 
 // Completion resolve provider
 connection.onCompletionResolve((item: CompletionItem): CompletionItem => {
@@ -528,8 +1038,11 @@ connection.onCompletionResolve((item: CompletionItem): CompletionItem => {
 connection.onHover((params: TextDocumentPositionParams): Hover | null => {
   const document = documents.get(params.textDocument.uri);
   if (!document) {
+    connection.console.log(`[Hover] Hover requested for unknown document: ${params.textDocument.uri}`);
     return null;
   }
+
+  connection.console.log(`[Hover] Hover requested at ${params.position.line}:${params.position.character} in ${params.textDocument.uri}`);
 
   const text = document.getText();
   const position = params.position;
@@ -563,17 +1076,125 @@ connection.onHover((params: TextDocumentPositionParams): Hover | null => {
     };
   }
 
-  // Check if it's a function
-  const func = findFunction(word);
+  // Check if it's a function (core first)
+  let func = findFunction(word) || (FUNCTION_ALIASES[word] ? findFunction(FUNCTION_ALIASES[word]!) : undefined);
   if (func) {
-    const params = func.parameters.map(p =>
+    const params = func.parameters.map((p: any) =>
       p.defaultValue ? `${p.type} ${p.name} = ${p.defaultValue}` : `${p.type} ${p.name}`
     ).join(', ');
+
+    const cleanDescription = cleanFunctionDescription(func.description || '');
 
     return {
       contents: {
         kind: MarkupKind.Markdown,
-        value: `**${func.name}** (${func.returnType})\n\n\`\`\`nwscript\n${func.returnType} ${func.name}(${params})\n\`\`\`\n\n${func.description || 'KOTOR function'}${func.category ? `\n\n*Category:* ${func.category}` : ''}`
+        value: `**${func.name}** (${func.returnType})\n\n\`\`\`nwscript\n${func.returnType} ${func.name}(${params})\n\`\`\`\n\n${cleanDescription || 'KOTOR function'}${func.category ? `\n\n*Category:* ${func.category}` : ''}`
+      },
+      range: {
+        start: { line: position.line, character: wordRange.start },
+        end: { line: position.line, character: wordRange.end }
+      }
+    };
+  }
+
+  // Check if it's a scriptlib function
+  const documentScriptlibFunctions = getAvailableFunctions(text);
+  const scriptlibFunc = documentScriptlibFunctions.find((f: NWScriptFunction) => f.name === word) || GLOBAL_SCRIPTLIB.functions.find((f: NWScriptFunction) => f.name === word) || (FUNCTION_ALIASES[word] ? (documentScriptlibFunctions.find((f: NWScriptFunction) => f.name === FUNCTION_ALIASES[word]) || GLOBAL_SCRIPTLIB.functions.find((f: NWScriptFunction) => f.name === FUNCTION_ALIASES[word]!)) : undefined);
+  if (scriptlibFunc) {
+    const params = (scriptlibFunc.parameters || []).map((p: NWScriptParameter) =>
+      p.defaultValue ? `${p.type} ${p.name} = ${p.defaultValue}` : `${p.type} ${p.name}`
+    ).join(', ');
+
+    const cleanDescription = cleanFunctionDescription(scriptlibFunc.description || '');
+
+    return {
+      contents: {
+        kind: MarkupKind.Markdown,
+        value: `**${scriptlibFunc.name}** (${scriptlibFunc.returnType})${(scriptlibFunc as any).includeFile ? ` from \`${(scriptlibFunc as any).includeFile}\`` : ''}\n\n\`\`\`nwscript\n${scriptlibFunc.returnType} ${scriptlibFunc.name}(${params})\n\`\`\`\n\n${cleanDescription || 'NWScript scriptlib function'}${scriptlibFunc.category ? `\n\n*Category:* ${scriptlibFunc.category}` : ''}`
+      },
+      range: {
+        start: { line: position.line, character: wordRange.start },
+        end: { line: position.line, character: wordRange.end }
+      }
+    };
+  }
+
+  // Check for scriptlib constants in document or global
+  const scriptlibConsts = getAvailableConstants(text);
+  if (scriptlibConsts.hasOwnProperty(word) || GLOBAL_SCRIPTLIB.constants.hasOwnProperty(word)) {
+    const val = scriptlibConsts.hasOwnProperty(word) ? (scriptlibConsts as any)[word] : (GLOBAL_SCRIPTLIB.constants as any)[word];
+    const type = typeof val === 'number' ? 'int' : typeof val === 'string' ? 'string' : 'unknown';
+    return {
+      contents: {
+        kind: MarkupKind.Markdown,
+        value: `**${word}** (${type})\n\n*Value:* \`${val}\``
+      },
+      range: {
+        start: { line: position.line, character: wordRange.start },
+        end: { line: position.line, character: wordRange.end }
+      }
+    };
+  }
+
+  // Check if it's a variable with an inferred value (via interpreter analysis)
+  const inferredValue = interpreter.getVariableValue(params.textDocument.uri, word, position);
+  if (inferredValue) {
+    let content = `**${word}** (${inferredValue.type})`;
+
+    // For known values
+    if (inferredValue.isKnown) {
+      let valueDisplay = '';
+
+      if (inferredValue.type === 'string') {
+        valueDisplay = `"${inferredValue.value}"`;
+      } else {
+        valueDisplay = `${inferredValue.value}`;
+      }
+
+      content += `\n\n*Inferred value:* \`${valueDisplay}\``;
+    }
+    // For conditional values
+    else if (inferredValue.conditions && inferredValue.conditions.length > 0) {
+      content += '\n\n*Conditional values:*';
+
+      inferredValue.conditions.forEach(condition => {
+        let condValueDisplay = '';
+
+        if (condition.value.type === 'string') {
+          condValueDisplay = `"${condition.value.value}"`;
+        } else {
+          condValueDisplay = `${condition.value.value}`;
+        }
+
+        content += `\n- When \`${condition.condition}\`: \`${condValueDisplay}\``;
+      });
+    }
+    // For unknown values
+    else {
+      content += '\n\n*Value could not be determined statically*';
+
+      // Try to provide context about the variable
+      const scopeType = interpreter.getScopeTypeAt(params.textDocument.uri, position);
+      if (scopeType !== null) {
+        if (scopeType === ScopeType.Function) {
+          content += '\n\nVariable is defined in function scope';
+        } else if (scopeType === ScopeType.Loop) {
+          content += '\n\nVariable is modified in a loop';
+        } else if (scopeType === ScopeType.Conditional) {
+          content += '\n\nVariable has different values in conditional branches';
+        }
+      }
+    }
+
+    // Show scope information
+    // Scope string for hover
+    const st = interpreter.getScopeTypeAt(params.textDocument.uri, position);
+    if (st !== null) content += `\n\n*Scope:* ${ScopeType[st]}`;
+
+    return {
+      contents: {
+        kind: MarkupKind.Markdown,
+        value: content
       },
       range: {
         start: { line: position.line, character: wordRange.start },
@@ -616,6 +1237,276 @@ function getWordRangeAtPosition(line: string, character: number): { start: numbe
   return { start, end };
 }
 
+// Definition provider
+connection.onDefinition((params: TextDocumentPositionParams) => {
+  const document = documents.get(params.textDocument.uri);
+  if (!document) return null;
+  const text = document.getText();
+  const lines = text.split('\n');
+  if (params.position.line >= lines.length) return null;
+  const line = lines[params.position.line] || '';
+  
+  // Check if we're clicking on an include directive
+  const includeMatch = line.match(/^\s*#include\s+"([A-Za-z0-9_]+)"/);
+  if (includeMatch && includeMatch[1]) {
+    const includeName = includeMatch[1];
+    const includeStart = line.indexOf('"') + 1;
+    const includeEnd = includeStart + includeName.length;
+    
+    // Check if cursor is within the include name
+    if (params.position.character >= includeStart && params.position.character <= includeEnd) {
+      const includeText = decodeInclude(includeName);
+      if (includeText) {
+        return {
+          uri: `hololsp:/kotor/${includeName}.nss`,
+          range: {
+            start: { line: 0, character: 0 },
+            end: { line: 0, character: 0 }
+          }
+        };
+      } else {
+        // Include file doesn't exist - return null so LSP shows "No definition found"
+        return null;
+      }
+    }
+  }
+  
+  const range = getWordRangeAtPosition(line, params.position.character);
+  if (!range) return null;
+  const word = line.substring(range.start, range.end);
+
+  // Try functions first (document includes, then global)
+  const docFuncs = getAvailableFunctions(text) as any[];
+  const func = (docFuncs.find(f => f.name === word) as any) || (GLOBAL_SCRIPTLIB.functions as any[]).find(f => f.name === word);
+  if (func && func.includeFile && func.location) {
+    const uri = `hololsp:/kotor/${func.includeFile}.nss`;
+    return {
+      uri,
+      range: {
+        start: { line: func.location.line, character: func.location.character },
+        end: { line: func.location.line, character: func.location.character + String(func.name).length }
+      }
+    };
+  }
+
+  // Then constants (document includes, then global)
+  const docConsts = getAvailableConstants(text) as any;
+  const inDocConsts = Object.prototype.hasOwnProperty.call(docConsts, word);
+  const inGlobalConsts = Object.prototype.hasOwnProperty.call(GLOBAL_SCRIPTLIB.constants, word);
+  if (inDocConsts || inGlobalConsts) {
+    // We don't currently store per-document const positions. Use global if available.
+    // Try to find in any parsed include by scanning cache
+    for (const [inc, parsed] of includeCache.entries()) {
+      const loc = parsed.constantMeta?.[word];
+      if (loc) {
+        const uri = `hololsp:/kotor/${inc}.nss`;
+        return {
+          uri,
+          range: {
+            start: { line: loc.line, character: loc.character },
+            end: { line: loc.line, character: loc.character + word.length }
+          }
+        };
+      }
+    }
+  }
+
+  return null;
+});
+
+// Declaration provider (shows where something is declared)
+connection.onDeclaration((params: TextDocumentPositionParams) => {
+  // For NWScript, declaration and definition are often the same
+  // But we can differentiate between prototypes and implementations
+  const document = documents.get(params.textDocument.uri);
+  if (!document) return null;
+  const text = document.getText();
+  const lines = text.split('\n');
+  if (params.position.line >= lines.length) return null;
+  const line = lines[params.position.line] || '';
+  const range = getWordRangeAtPosition(line, params.position.character);
+  if (!range) return null;
+  const word = line.substring(range.start, range.end);
+
+  // Parse the document to find function declarations
+  try {
+    const parseResult = NWScriptParser.parseWithErrors(text);
+    if (parseResult.program) {
+      // Look for function declarations in the current document
+      for (const decl of parseResult.program.body) {
+        if (decl instanceof FunctionDeclaration && decl.name === word) {
+          return {
+            uri: params.textDocument.uri,
+            range: {
+              start: { line: decl.range.start.line, character: decl.range.start.column },
+              end: { line: decl.range.start.line, character: decl.range.start.column + decl.name.length }
+            }
+          };
+        }
+      }
+    }
+  } catch (error) {
+    connection.console.error(`[Declaration] Parse error: ${error}`);
+  }
+
+  // Fall back to definition provider behavior
+  return null;
+});
+
+// References provider
+connection.onReferences((params) => {
+  const document = documents.get(params.textDocument.uri);
+  if (!document) return [];
+  const text = document.getText();
+  const lines = text.split('\n');
+  const line = lines[params.position.line] || '';
+  const wordRange = getWordRangeAtPosition(line, params.position.character);
+  if (!wordRange) return [];
+  const word = line.substring(wordRange.start, wordRange.end);
+
+  const results: Location[] = [];
+  const wordRegex = new RegExp(`\\b${word.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&')}\\b`, 'g');
+
+  for (let li = 0; li < lines.length; li++) {
+    const l = lines[li] || '';
+    let m: RegExpExecArray | null;
+    while ((m = wordRegex.exec(l)) !== null) {
+      results.push({
+        uri: params.textDocument.uri,
+        range: {
+          start: { line: li, character: m.index },
+          end: { line: li, character: m.index + word.length }
+        }
+      });
+    }
+  }
+
+  return results;
+});
+
+// Document symbol provider
+connection.onDocumentSymbol((params) => {
+  const document = documents.get(params.textDocument.uri);
+  if (!document) return [];
+  const text = document.getText();
+  
+  try {
+    const parseResult = NWScriptParser.parseWithErrors(text);
+    if (!parseResult.program) return [];
+    
+    const symbols: DocumentSymbol[] = [];
+    
+    // Add functions
+    for (const decl of parseResult.program.body) {
+      if (decl instanceof FunctionDeclaration) {
+        const symbol: DocumentSymbol = {
+          name: decl.name,
+          detail: `${decl.returnType.name} ${decl.name}(${decl.parameters.map(p => `${p.paramType.name} ${p.name}`).join(', ')})`,
+          kind: SymbolKind.Function,
+          range: {
+            start: { line: decl.range.start.line, character: decl.range.start.column },
+            end: { line: decl.range.end.line, character: decl.range.end.column }
+          },
+          selectionRange: {
+            start: { line: decl.range.start.line, character: decl.range.start.column },
+            end: { line: decl.range.start.line, character: decl.range.start.column + decl.name.length }
+          }
+        };
+        symbols.push(symbol);
+      } else if (decl instanceof VariableDeclaration) {
+        const symbol: DocumentSymbol = {
+          name: decl.name,
+          detail: `${decl.varType.name} ${decl.name}`,
+          kind: decl.isConstant ? SymbolKind.Constant : SymbolKind.Variable,
+          range: {
+            start: { line: decl.range.start.line, character: decl.range.start.column },
+            end: { line: decl.range.end.line, character: decl.range.end.column }
+          },
+          selectionRange: {
+            start: { line: decl.range.start.line, character: decl.range.start.column },
+            end: { line: decl.range.start.line, character: decl.range.start.column + decl.name.length }
+          }
+        };
+        symbols.push(symbol);
+      }
+    }
+    
+    return symbols;
+  } catch (error) {
+    connection.console.error(`[DocumentSymbol] Error: ${error}`);
+    return [];
+  }
+});
+
+// Workspace symbol provider
+connection.onWorkspaceSymbol((params) => {
+  const query = params.query.toLowerCase();
+  const symbols: WorkspaceSymbol[] = [];
+  
+  // Search through all open documents
+  for (const document of documents.all()) {
+    const text = document.getText();
+    try {
+      const parseResult = NWScriptParser.parseWithErrors(text);
+      if (!parseResult.program) continue;
+      
+      for (const decl of parseResult.program.body) {
+        if (decl instanceof FunctionDeclaration) {
+          if (decl.name.toLowerCase().includes(query)) {
+            symbols.push({
+              name: decl.name,
+              kind: SymbolKind.Function,
+              location: {
+                uri: document.uri,
+                range: {
+                  start: { line: decl.range.start.line, character: decl.range.start.column },
+                  end: { line: decl.range.end.line, character: decl.range.end.column }
+                }
+              }
+            });
+          }
+        } else if (decl instanceof VariableDeclaration) {
+          if (decl.name.toLowerCase().includes(query)) {
+            symbols.push({
+              name: decl.name,
+              kind: decl.isConstant ? SymbolKind.Constant : SymbolKind.Variable,
+              location: {
+                uri: document.uri,
+                range: {
+                  start: { line: decl.range.start.line, character: decl.range.start.column },
+                  end: { line: decl.range.end.line, character: decl.range.end.column }
+                }
+              }
+            });
+          }
+        }
+      }
+    } catch (error) {
+      connection.console.error(`[WorkspaceSymbol] Parse error for ${document.uri}: ${error}`);
+    }
+  }
+  
+  return symbols;
+});
+
+// Code action provider
+connection.onCodeAction((params) => {
+  // This would be where we add quick fixes
+  return [];
+});
+
+// Provide include content for virtual URIs
+connection.onRequest('hololsp/includeText', (params: { include: string }): { text: string } | null => {
+  connection.console.log(`[IncludeText] Include text requested: ${params.include}`);
+  const text = decodeInclude(params.include);
+  if (!text) {
+    connection.console.log(`[IncludeText] Include not found: ${params.include}`);
+    return null;
+  }
+  connection.console.log(`[IncludeText] Include text provided: ${params.include} (${text.length} chars)`);
+  return { text };
+});
+
 // Signature help provider
 connection.onSignatureHelp((params: TextDocumentPositionParams): SignatureHelp | null => {
   const document = documents.get(params.textDocument.uri);
@@ -643,7 +1534,8 @@ connection.onSignatureHelp((params: TextDocumentPositionParams): SignatureHelp |
 
   const functionName = functionCallMatch[1];
   if (!functionName) return null;
-  const func = findFunction(functionName);
+  const alias = FUNCTION_ALIASES[functionName];
+  const func = findFunction(functionName) || (alias ? findFunction(alias as string) : undefined);
 
   if (!func) {
     return null;
@@ -670,7 +1562,7 @@ connection.onSignatureHelp((params: TextDocumentPositionParams): SignatureHelp |
     label: `${func.returnType} ${func.name}(${func.parameters.map(p =>
       `${p.type} ${p.name}${p.defaultValue ? ` = ${p.defaultValue}` : ''}`
     ).join(', ')})`,
-    documentation: func.description || `Function returning ${func.returnType}`,
+    documentation: cleanFunctionDescription(func.description) || `Function returning ${func.returnType}`,
     parameters: parameterInfos
   };
 
@@ -679,6 +1571,250 @@ connection.onSignatureHelp((params: TextDocumentPositionParams): SignatureHelp |
     activeSignature: 0,
     activeParameter: activeParameter >= 0 ? activeParameter : 0
   };
+});
+
+// Type Definition provider
+connection.onTypeDefinition((params: TextDocumentPositionParams) => {
+  const document = documents.get(params.textDocument.uri);
+  if (!document) return null;
+  
+  const text = document.getText();
+  const lines = text.split('\n');
+  if (params.position.line >= lines.length) return null;
+  
+  const line = lines[params.position.line] || '';
+  const range = getWordRangeAtPosition(line, params.position.character);
+  if (!range) return null;
+  
+  const word = line.substring(range.start, range.end);
+  
+  // Try to find type definition for variables
+  try {
+    const parseResult = NWScriptParser.parseWithErrors(text);
+    if (parseResult.program) {
+      for (const decl of parseResult.program.body) {
+        if (decl instanceof VariableDeclaration && decl.name === word) {
+          // Return the type definition location (same as declaration for now)
+          return {
+            uri: params.textDocument.uri,
+            range: {
+              start: { line: decl.range.start.line, character: decl.range.start.column },
+              end: { line: decl.range.start.line, character: decl.range.start.column + decl.varType.name.length }
+            }
+          };
+        }
+      }
+    }
+  } catch (error) {
+    connection.console.error(`[TypeDefinition] Parse error: ${error}`);
+  }
+  
+  return null;
+});
+
+// Implementation provider
+connection.onImplementation((params: TextDocumentPositionParams) => {
+  const document = documents.get(params.textDocument.uri);
+  if (!document) return null;
+  
+  const text = document.getText();
+  const lines = text.split('\n');
+  if (params.position.line >= lines.length) return null;
+  
+  const line = lines[params.position.line] || '';
+  const range = getWordRangeAtPosition(line, params.position.character);
+  if (!range) return null;
+  
+  const word = line.substring(range.start, range.end);
+  
+  // Find function implementations (non-prototype functions)
+  try {
+    const parseResult = NWScriptParser.parseWithErrors(text);
+    if (parseResult.program) {
+      const implementations: Location[] = [];
+      
+      for (const decl of parseResult.program.body) {
+        if (decl instanceof FunctionDeclaration && decl.name === word && !decl.isPrototype) {
+          implementations.push({
+            uri: params.textDocument.uri,
+            range: {
+              start: { line: decl.range.start.line, character: decl.range.start.column },
+              end: { line: decl.range.start.line, character: decl.range.start.column + decl.name.length }
+            }
+          });
+        }
+      }
+      
+      return implementations.length > 0 ? implementations : null;
+    }
+  } catch (error) {
+    connection.console.error(`[Implementation] Parse error: ${error}`);
+  }
+  
+  return null;
+});
+
+// Document Highlight provider
+connection.onDocumentHighlight((params: TextDocumentPositionParams) => {
+  const document = documents.get(params.textDocument.uri);
+  if (!document) return [];
+  
+  const text = document.getText();
+  const lines = text.split('\n');
+  if (params.position.line >= lines.length) return [];
+  
+  const line = lines[params.position.line] || '';
+  const range = getWordRangeAtPosition(line, params.position.character);
+  if (!range) return [];
+  
+  const word = line.substring(range.start, range.end);
+  const highlights: any[] = [];
+  
+  // Find all occurrences of the word in the document
+  for (let i = 0; i < lines.length; i++) {
+    const currentLine = lines[i] || '';
+    const regex = new RegExp(`\\b${word}\\b`, 'g');
+    let match;
+    
+    while ((match = regex.exec(currentLine)) !== null) {
+      highlights.push({
+        range: {
+          start: { line: i, character: match.index },
+          end: { line: i, character: match.index + word.length }
+        },
+        kind: 1 // Text highlight kind
+      });
+    }
+  }
+  
+  return highlights;
+});
+
+// Rename provider
+connection.onPrepareRename((params: TextDocumentPositionParams) => {
+  const document = documents.get(params.textDocument.uri);
+  if (!document) return null;
+  
+  const text = document.getText();
+  const lines = text.split('\n');
+  if (params.position.line >= lines.length) return null;
+  
+  const line = lines[params.position.line] || '';
+  const range = getWordRangeAtPosition(line, params.position.character);
+  if (!range) return null;
+  
+  const word = line.substring(range.start, range.end);
+  
+  // Check if the symbol can be renamed (user-defined functions/variables)
+  try {
+    const parseResult = NWScriptParser.parseWithErrors(text);
+    if (parseResult.program) {
+      for (const decl of parseResult.program.body) {
+        if ((decl instanceof FunctionDeclaration && decl.name === word) ||
+            (decl instanceof VariableDeclaration && decl.name === word)) {
+          return {
+            start: { line: params.position.line, character: range.start },
+            end: { line: params.position.line, character: range.end }
+          };
+        }
+      }
+    }
+  } catch (error) {
+    connection.console.error(`[PrepareRename] Parse error: ${error}`);
+  }
+  
+  return null;
+});
+
+connection.onRenameRequest((params) => {
+  const document = documents.get(params.textDocument.uri);
+  if (!document) return null;
+  
+  const text = document.getText();
+  const lines = text.split('\n');
+  if (params.position.line >= lines.length) return null;
+  
+  const line = lines[params.position.line] || '';
+  const range = getWordRangeAtPosition(line, params.position.character);
+  if (!range) return null;
+  
+  const oldName = line.substring(range.start, range.end);
+  const changes: any[] = [];
+  
+  // Find all occurrences of the old name and replace with new name
+  for (let i = 0; i < lines.length; i++) {
+    const currentLine = lines[i] || '';
+    const regex = new RegExp(`\\b${oldName}\\b`, 'g');
+    let match;
+    
+    while ((match = regex.exec(currentLine)) !== null) {
+      changes.push({
+        range: {
+          start: { line: i, character: match.index },
+          end: { line: i, character: match.index + oldName.length }
+        },
+        newText: params.newName
+      });
+    }
+  }
+  
+  return {
+    changes: {
+      [params.textDocument.uri]: changes
+    }
+  };
+});
+
+// Folding Range provider
+connection.onFoldingRanges((params) => {
+  const document = documents.get(params.textDocument.uri);
+  if (!document) return [];
+  
+  const text = document.getText();
+  const lines = text.split('\n');
+  const foldingRanges: any[] = [];
+  
+  let braceStack: number[] = [];
+  let commentStart: number | null = null;
+  let inBlockComment = false;
+  
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] || '';
+    
+    // Handle block comments
+    if (line.includes('/*') && !inBlockComment) {
+      commentStart = i;
+      inBlockComment = true;
+    }
+    if (line.includes('*/') && inBlockComment) {
+      if (commentStart !== null && i > commentStart) {
+        foldingRanges.push({
+          startLine: commentStart,
+          endLine: i,
+          kind: 'comment'
+        });
+      }
+      commentStart = null;
+      inBlockComment = false;
+    }
+    
+    // Handle braces for code folding
+    if (line.includes('{')) {
+      braceStack.push(i);
+    }
+    if (line.includes('}') && braceStack.length > 0) {
+      const startLine = braceStack.pop();
+      if (startLine !== undefined && i > startLine) {
+        foldingRanges.push({
+          startLine: startLine,
+          endLine: i,
+          kind: 'region'
+        });
+      }
+    }
+  }
+  
+  return foldingRanges;
 });
 
 // Make the text document manager listen on the connection
