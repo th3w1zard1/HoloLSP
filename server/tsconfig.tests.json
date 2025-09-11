@@ -1,7 +1,7 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "outDir": "./out-test",
+    "outDir": "./out/test",
     "rootDir": "./",
     "noEmit": false,
     "types": []
@@ -12,8 +12,7 @@
   ],
   "exclude": [
     "node_modules",
-    "out",
-    "out-test"
+    "out"
   ]
 }
 

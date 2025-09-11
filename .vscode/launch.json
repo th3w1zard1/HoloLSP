@@ -7,7 +7,7 @@
       "request": "launch",
       "args": ["--extensionDevelopmentPath=${workspaceFolder}"],
       "outFiles": ["${workspaceFolder}/client/out/**/*.js"],
-      "preLaunchTask": "npm: compile"
+      "preLaunchTask": "Compile"
     },
     {
       "name": "Debug Server",
@@ -23,8 +23,8 @@
       "request": "launch",
       "args": ["--extensionDevelopmentPath=${workspaceFolder}"],
       "outFiles": ["${workspaceFolder}/client/out/**/*.js"],
-      "preLaunchTask": "npm: compile",
-      "postDebugTask": "npm: kill-server"
+      "preLaunchTask": "Compile",
+      "postDebugTask": "Kill Server"
     }
   ],
   "compounds": [

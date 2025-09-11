@@ -1,11 +1,12 @@
 {
   "name": "holo-lsp",
   "description": "Language Server Protocol extension for KOTOR NWScript - providing IntelliSense, syntax highlighting, and code completion for Star Wars: Knights of the Old Republic scripting",
-  "author": "HoloLSP Team",
+  "author": "th3w1zard1",
   "license": "MIT",
   "version": "1.0.0",
   "publisher": "holo-lsp",
   "categories": [
+    "Languages",
     "Programming Languages",
     "Other"
   ],
@@ -16,35 +17,11 @@
   "engines": {
     "vscode": "^1.75.0"
   },
-  "main": "./client/out/extension",
   "activationEvents": [
-    "onLanguage:nwscript",
-    "onCommand:nwscript.startDebugging",
-    "workspaceContains:**/*.nss",
-    "workspaceContains:**/*.ncs"
+    "onLanguage"
   ],
+  "main": "./client/out/extension",
   "contributes": {
-    "languages": [
-      {
-        "id": "nwscript",
-        "aliases": [
-          "NWScript",
-          "nwscript"
-        ],
-        "extensions": [
-          ".nss",
-          ".ncs"
-        ],
-        "configuration": "./language-configuration.json"
-      }
-    ],
-    "grammars": [
-      {
-        "language": "nwscript",
-        "scopeName": "source.nwscript",
-        "path": "./syntaxes/nwscript.tmLanguage.json"
-      }
-    ],
     "configuration": {
       "type": "object",
       "title": "HoloLSP",
@@ -68,6 +45,27 @@
         }
       }
     },
+    "languages": [
+      {
+        "id": "nwscript",
+        "aliases": [
+          "NWScript",
+          "nwscript"
+        ],
+        "extensions": [
+          ".nss",
+          ".ncs"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "nwscript",
+        "scopeName": "source.nwscript",
+        "path": "./syntaxes/nwscript.tmLanguage.json"
+      }
+    ],
     "debuggers": [
       {
         "type": "nwscript",
@@ -140,28 +138,21 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile && npm run fix-workspace-junctions",
-    "fix-workspace-junctions": "node -e \"const fs=require('fs');const path=require('path');[['holo-lsp-client','client'],['holo-lsp-server','server']].forEach(([pkg,dir])=>{const src=path.join('node_modules',pkg);if(fs.existsSync(src)){fs.rmSync(src,{recursive:true,force:true});fs.cpSync(dir,src,{recursive:true});}})\"",
-    "package": "npx @vscode/vsce package --no-dependencies -o output/holo-lsp-1.0.0.vsix",
-    "clean": "tsc -b --clean",
-    "compile": "npm run clean && tsc -b",
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -b",
     "watch": "tsc -b -w",
-    "build:tests": "npm run -w server build:tests"
+    "postinstall": "cd client && npm install && cd ../server && npm install && cd ..",
+    "clean": "npx -y rimraf ./client ./server",
+    "fix-workspace-junctions": "node -e \"const fs=require('fs');const path=require('path');[['holo-lsp-client','client'],['holo-lsp-server','server']].forEach(([pkg,dir])=>{const src=path.join('node_modules',pkg);if(fs.existsSync(src)){fs.rmSync(src,{recursive:true,force:true});fs.cpSync(dir,src,{recursive:true});}});console.log('Workspace junctions fixed');\"",
+    "publish": "npx -y @vscode/vsce package -o output/holo-lsp-1.0.0.vsix",
+    "build:mcp": "npm run -w mcp build",
+    "build:tests": "npm run -w server build:tests",
+    "inspect:mcp": "npm run -w mcp inspect",
+    "start:mcp": "npm run -w mcp start"
   },
   "devDependencies": {
     "@types/node": "^20.5.7",
     "rimraf": "^5.0.5",
-    "typescript": "^5.3.3"
-  },
-  "dependencies": {
-    "@vscode/debugadapter": "^1.68.0",
-    "@vscode/debugprotocol": "^1.68.0",
-    "vscode-languageclient": "^8.1.0",
-    "vscode-languageserver": "^8.1.0",
-    "vscode-languageserver-textdocument": "^1.0.8"
-  },
-  "workspaces": [
-    "client",
-    "server"
-  ]
+    "typescript": "^5.2.2"
+  }
 }

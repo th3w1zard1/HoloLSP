@@ -33,7 +33,7 @@
       "problemMatcher": []
     },
     {
-      "label": "npm: compile",
+      "label": "Compile",
       "type": "npm",
       "script": "compile",
       "group": "build",
@@ -107,7 +107,7 @@
       "problemMatcher": []
     },
     {
-      "label": "npm: watch",
+      "label": "Watch",
       "type": "npm",
       "script": "watch",
       "group": "build",
@@ -120,7 +120,7 @@
       "problemMatcher": ["$tsc-watch"]
     },
     {
-      "label": "npm: kill-server",
+      "label": "Kill Server",
       "type": "shell",
       "command": "taskkill",
       "args": ["/F", "/IM", "node.exe", "/T"],

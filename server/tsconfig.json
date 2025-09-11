@@ -1,17 +1,16 @@
 {
-  "extends": "../tsconfig.json",
   "compilerOptions": {
-    "outDir": "./out",
-    "rootDir": "./src",
-    "lib": ["ES2020"],
-    "types": ["node"],
-    "composite": true
+    "target": "es2020",
+    "lib": ["es2020"],
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "sourceMap": true,
+    "strict": true,
+    "outDir": "out",
+    "rootDir": "src",
+    "incremental": true,
+    "forceConsistentCasingInFileNames": true
   },
-  "include": [
-    "./src/**/*"
-  ],
-  "exclude": [
-    "node_modules",
-    "out"
-  ]
+  "include": ["src"],
+  "exclude": ["node_modules", ".vscode-test"]
 }
