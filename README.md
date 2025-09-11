@@ -46,12 +46,12 @@ A comprehensive Language Server Protocol extension for VS Code that provides Int
 3. ~~Search for "HoloLSP"~~
 4. ~~Click Install~~
 
-### Manual Installation (unfinished)
+### Manual Installation
 
-1. ~~Download the `.vsix` file from the [Releases](https://github.com/th3w1zard1/HoloLSP/releases) page~~
-2. ~~Open VS Code~~
-3. ~~Run `Extensions: Install from VSIX...` from the Command Palette (Ctrl+Shift+P)~~
-4. ~~Select the downloaded `.vsix` file~~
+1. Download the `.vsix` file from the [Releases](https://github.com/th3w1zard1/HoloLSP/releases) page
+2. Open VS Code
+3. Run `Extensions: Install from VSIX...` from the Command Palette (Ctrl+Shift+P)
+4. Select the downloaded `.vsix` file
 
 ## Usage
 
