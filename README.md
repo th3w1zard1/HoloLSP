@@ -127,7 +127,98 @@ void main() {
 }
 ```
 
+## Configuration
+
+### Extension Settings
+
+Configure HoloLSP through VS Code settings:
+
+```json
+{
+  "holoLSP.maxNumberOfProblems": 100
+}
+```
+
+#### Available Settings
+
+- `holoLSP.maxNumberOfProblems` (number, default: 100)  
+  Controls the maximum number of problems produced by the server. Configure this if it does not run well on your system.
+
+## Supported File Types
+
+- `.nss` - NWScript source files
+- `.ncs` - Compiled NWScript files (read-only support, mostly WIP)
+
+## KOTOR Function Library
+
+HoloLSP includes comprehensive function and constant definitions for both KOTOR games:
+
+- **5000+ Functions** - Complete KOTOR 1 and KOTOR 2 function libraries (from e.g. nwscript.nss)
+- **2000+ Constants** - All game constants, categorized for organizational usage.
+- **Include Files** - Bundled KOTOR script library includes (`k_inc_generic`, `k_inc_utility`, etc.)
+- **Type Definitions** - Complete type system with proper validation
+
+## Advanced Features
+
+### Variable Value Inference
+
+HoloLSP can infer and display variable values:
+
+```nwscript
+int a = 10;
+int b = 5;
+int c = (a > b) ? 100 : 200; // Hover shows: c = 100
+```
+
+### Include File Resolution
+
+Automatically resolves include files from the bundled KOTOR libraries:
+
+```nwscript
+#include "k_inc_generic"  // Resolves to bundled library
+#include "some_local_script" // Looks for local file (should be adjacent to the script in question--modules aren't supported yet
+```
+
+### Expression Evaluation
+
+Evaluates complex expressions in real time:
+
+```nwscript
+const int RESULT = 2 + 3 * 4; // Shows: RESULT = 14
+vector vPos = [1.0, 2.0, 3.0] + Vector(1.0, 0.0, 0.0); // Shows computed result
+```
+
+## Contributing
+
+1. **Fork the repository**
+2. **Create a feature branch:** `git checkout -b feature/amazing-feature`
+3. **Commit your changes:** `git commit -m 'Add amazing feature'`
+4. **Push to the branch:** `git push origin feature/amazing-feature`
+5. **Open a Pull Request**
+
+### Development Guidelines
+
+- Add tests for new features (preferably using Jest)
+- Update documentation for user-facing changes
+- Fork the repo, submit a PR.
+
+## Known Issues
+
+- Large include files may cause performance issues during initial parsing (e.g., `nwscript.nss`, or large include chains)
+- Some complex macro expansions are not fully supported
+- Most of the assumptions about the syntax were heavily based on C/C++, others taken from projects like GitHub's own markdown template for nwn:ee. Please report any incorrect syntax that isn't valid in the games.
+
+## Roadmap
+
+- [ ] **Enhanced Debugging** - More advanced debugging features
+- [ ] **Script Compilation** - Built-in NWScript compiler
+- [ ] **Module Integration** - Direct integration with KOTOR module files (ERF/RIM/MOD) potentially even BIK.
+- [ ] **Template Support** - Script templates and snippets for common KOTOR patterns
+- [ ] **Performance Optimization** - Faster parsing for large projects
+
 ### Debugging
+
+Most of this section is untested.
 
 1. **Set breakpoints** by clicking in the gutter next to line numbers
 2. **Start debugging** using F5 or the "Debug NWScript" command
@@ -213,103 +304,6 @@ cd server && npm run test:watch
 1. **Open the project in VS Code**
 2. **Press F5** to launch a new Extension Development Host
 3. **Use "Client + Server" configuration** to debug both client and server simultaneously
-
-## Configuration
-
-### Extension Settings
-
-Configure HoloLSP through VS Code settings:
-
-```json
-{
-  "holoLSP.maxNumberOfProblems": 100,
-  "holoLSP.trace.server": "off"
-}
-```
-
-#### Available Settings
-
-- `holoLSP.maxNumberOfProblems` (number, default: 100)  
-  Controls the maximum number of problems produced by the server
-
-- `holoLSP.trace.server` (string, default: "off")  
-  Traces communication between VS Code and the language server
-  - `"off"` - No tracing
-  - `"messages"` - Trace messages
-  - `"verbose"` - Verbose tracing
-
-## Supported File Types
-
-- `.nss` - NWScript source files
-- `.ncs` - Compiled NWScript files (read-only support)
-
-## KOTOR Function Library
-
-HoloLSP includes comprehensive function and constant definitions for both KOTOR games:
-
-- **5000+ Functions** - Complete KOTOR 1 and KOTOR 2 function libraries
-- **2000+ Constants** - All game constants with proper categorization
-- **Include Files** - Bundled KOTOR script library includes (`k_inc_generic`, `k_inc_utility`, etc.)
-- **Type Definitions** - Complete type system with proper validation
-
-## Advanced Features
-
-### Variable Value Inference
-
-HoloLSP can infer and display variable values:
-
-```nwscript
-int a = 10;
-int b = 5;
-int c = (a > b) ? 100 : 200; // Hover shows: c = 100
-```
-
-### Include File Resolution
-
-Automatically resolves include files from the bundled KOTOR libraries:
-
-```nwscript
-#include "k_inc_generic"  // Resolves to bundled library
-#include "custom_include" // Looks for local file
-```
-
-### Expression Evaluation
-
-Evaluates complex expressions at compile-time:
-
-```nwscript
-const int RESULT = 2 + 3 * 4; // Shows: RESULT = 14
-vector vPos = [1.0, 2.0, 3.0] + Vector(1.0, 0.0, 0.0); // Shows computed result
-```
-
-## Contributing
-
-1. **Fork the repository**
-2. **Create a feature branch:** `git checkout -b feature/amazing-feature`
-3. **Commit your changes:** `git commit -m 'Add amazing feature'`
-4. **Push to the branch:** `git push origin feature/amazing-feature`
-5. **Open a Pull Request**
-
-### Development Guidelines
-
-- Follow TypeScript best practices
-- Add tests for new features
-- Update documentation for user-facing changes
-- Ensure compatibility with both KOTOR 1 and KOTOR 2
-
-## Known Issues
-
-- Large include files may cause performance issues during initial parsing
-- Some complex macro expansions are not fully supported
-- Debugging requires the script to be in a valid KOTOR module format
-
-## Roadmap
-
-- [ ] **Enhanced Debugging** - More advanced debugging features
-- [ ] **Module Integration** - Direct integration with KOTOR module files
-- [ ] **Script Compilation** - Built-in NWScript compiler
-- [ ] **Template Support** - Script templates for common KOTOR patterns
-- [ ] **Performance Optimization** - Faster parsing for large projects
 
 ## License
 
