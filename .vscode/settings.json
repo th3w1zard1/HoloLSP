@@ -10,13 +10,7 @@
     "*.ncs": "nwscript"
   },
   "search.exclude": {
-    "**/node_modules": true,
-    "**/out": true
-  },
-  "files.exclude": {
-    "**/node_modules": true,
-    "**/out": true,
-    "**/.git": true
+    "**/node_modules": true
   },
   "typescript.preferences.quoteStyle": "double",
   "editor.tabSize": 2,

@@ -1,3 +1,12 @@
+# Development files
+.history/
+*.d.ts
+*.d.ts.map
+*.js
+*.js.map
+*.map
+*.spec.ts
+
 # Compiled output
 /client/out/
 /server/out/
@@ -132,14 +141,8 @@ tramp
 
 # Test files
 test-files/
-*.test.nss
-.history/
-*.js
-*.map
-*.d.ts
-*.d.ts.map
-*.js.map
-output/
+
+# Unfinished files
 mcp/
-*.spec.ts
-.history/
+output/
+*.test.nss

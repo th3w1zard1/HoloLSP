@@ -17,7 +17,12 @@
     "vscode": "^1.75.0"
   },
   "main": "./client/out/extension",
-  "activationEvents": [],
+  "activationEvents": [
+    "onLanguage:nwscript",
+    "onCommand:nwscript.startDebugging",
+    "workspaceContains:**/*.nss",
+    "workspaceContains:**/*.ncs"
+  ],
   "contributes": {
     "languages": [
       {
@@ -136,7 +141,8 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
-    "compile": "tsc -b",
+    "clean": "tsc -b --clean",
+    "compile": "npm run clean && tsc -b",
     "watch": "tsc -b -w",
     "build:tests": "npm run -w server build:tests",
     "build:mcp": "npm run -w mcp build",
@@ -145,7 +151,15 @@
   },
   "devDependencies": {
     "@types/node": "^20.5.7",
-    "typescript": "^5.2.2"
+    "rimraf": "^5.0.5",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "@vscode/debugadapter": "^1.68.0",
+    "@vscode/debugprotocol": "^1.68.0",
+    "vscode-languageclient": "^8.1.0",
+    "vscode-languageserver": "^8.1.0",
+    "vscode-languageserver-textdocument": "^1.0.8"
   },
   "workspaces": [
     "client",

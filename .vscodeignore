@@ -8,13 +8,10 @@
 /.history
 /out
 
-# Node.js dependencies
-node_modules/**
-client/node_modules/**
-server/node_modules/**
-mcp/node_modules/**
+# Node.js dependencies (do NOT exclude production deps; vsce handles pruning dev deps)
+# Keep node_modules included so runtime dependencies are packaged
 
-# Build outputs (keep only the compiled 'out' directory)
+# Build outputs (exclude sources and tests; compiled 'out' is re-included below)
 client/src/**
 server/src/**
 mcp/src/**
@@ -27,7 +24,6 @@ server/test/**
 **/*.tsbuildinfo
 
 # Package files
-**/package-lock.json
 **/.npmignore
 
 # Development configuration

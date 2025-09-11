@@ -18,7 +18,22 @@
       "problemMatcher": []
     },
     {
-      "label": "Compile",
+      "label": "Clean",
+      "type": "npm",
+      "script": "clean",
+      "group": "build",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared",
+        "showReuseMessage": true,
+        "clear": false
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "npm: compile",
       "type": "npm",
       "script": "compile",
       "group": "build",
@@ -90,18 +105,6 @@
         "clear": true
       },
       "problemMatcher": []
-    },
-    {
-      "label": "npm: compile",
-      "type": "npm",
-      "script": "compile",
-      "group": "build",
-      "presentation": {
-        "panel": "shared",
-        "reveal": "silent",
-        "clear": true
-      },
-      "problemMatcher": ["$tsc"]
     },
     {
       "label": "npm: watch",
