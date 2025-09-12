@@ -512,16 +512,39 @@ const documents: TextDocuments<TextDocument> = new TextDocuments(TextDocument);
 // Settings interface
 interface HoloLSPSettings {
   maxNumberOfProblems: number;
+  builtinScriptsDirectory?: string;
 }
 
 // Default settings
 const defaultSettings: HoloLSPSettings = { 
-  maxNumberOfProblems: 1000
+  maxNumberOfProblems: 1000,
+  builtinScriptsDirectory: undefined
 };
 let globalSettings: HoloLSPSettings = defaultSettings;
 
 // Cache for settings of all open documents
 let documentSettings: Map<string, Thenable<HoloLSPSettings>> = new Map();
+
+// Helper function to resolve builtin script URIs based on configuration
+function resolveBuiltinScriptUri(includeName: string, currentDocumentUri: string, settings: HoloLSPSettings): string {
+  if (settings.builtinScriptsDirectory) {
+    // Use configured directory - convert to file:// URI if it's a local path
+    const baseUri = settings.builtinScriptsDirectory;
+    if (baseUri.startsWith('file://')) {
+      return `${baseUri}/${includeName}.nss`;
+    } else if (baseUri.startsWith('/') || baseUri.match(/^[A-Za-z]:/)) {
+      // Absolute path
+      return `file://${baseUri.replace(/\\/g, '/')}/${includeName}.nss`;
+    } else {
+      // Relative path - resolve relative to current document
+      const currentDir = currentDocumentUri.substring(0, currentDocumentUri.lastIndexOf('/'));
+      return `${currentDir}/${baseUri}/${includeName}.nss`;
+    }
+  } else {
+    // Fall back to hololsp:// scheme for backward compatibility
+    return `hololsp:/kotor/${includeName}.nss`;
+  }
+}
 
 // Language data storage (using imported KOTOR definitions)
 const constants: NWScriptConstant[] = KOTOR_CONSTANTS;
@@ -1238,13 +1261,16 @@ function getWordRangeAtPosition(line: string, character: number): { start: numbe
 }
 
 // Definition provider
-connection.onDefinition((params: TextDocumentPositionParams) => {
+connection.onDefinition(async (params: TextDocumentPositionParams) => {
   const document = documents.get(params.textDocument.uri);
   if (!document) return null;
   const text = document.getText();
   const lines = text.split('\n');
   if (params.position.line >= lines.length) return null;
   const line = lines[params.position.line] || '';
+  
+  // Get settings for URI resolution
+  const settings = await getDocumentSettings(params.textDocument.uri);
   
   // Check if we're clicking on an include directive
   const includeMatch = line.match(/^\s*#include\s+"([A-Za-z0-9_]+)"/);
@@ -1258,7 +1284,7 @@ connection.onDefinition((params: TextDocumentPositionParams) => {
       const includeText = decodeInclude(includeName);
       if (includeText) {
         return {
-          uri: `hololsp:/kotor/${includeName}.nss`,
+          uri: resolveBuiltinScriptUri(includeName, params.textDocument.uri, settings),
           range: {
             start: { line: 0, character: 0 },
             end: { line: 0, character: 0 }
@@ -1279,7 +1305,7 @@ connection.onDefinition((params: TextDocumentPositionParams) => {
   const docFuncs = getAvailableFunctions(text) as any[];
   const func = (docFuncs.find(f => f.name === word) as any) || (GLOBAL_SCRIPTLIB.functions as any[]).find(f => f.name === word);
   if (func && func.includeFile && func.location) {
-    const uri = `hololsp:/kotor/${func.includeFile}.nss`;
+    const uri = resolveBuiltinScriptUri(func.includeFile, params.textDocument.uri, settings);
     return {
       uri,
       range: {
@@ -1299,7 +1325,7 @@ connection.onDefinition((params: TextDocumentPositionParams) => {
     for (const [inc, parsed] of includeCache.entries()) {
       const loc = parsed.constantMeta?.[word];
       if (loc) {
-        const uri = `hololsp:/kotor/${inc}.nss`;
+        const uri = resolveBuiltinScriptUri(inc, params.textDocument.uri, settings);
         return {
           uri,
           range: {
@@ -1353,6 +1379,20 @@ connection.onDeclaration((params: TextDocumentPositionParams) => {
   return null;
 });
 
+// Helper function to check if a position is in a comment
+function isInComment(line: string, characterIndex: number): boolean {
+  // Check for single-line comments (//)
+  const commentIndex = line.indexOf('//');
+  if (commentIndex !== -1 && characterIndex >= commentIndex) {
+    return true;
+  }
+  
+  // TODO: Add support for multi-line comments /* */ if needed
+  // For now, NWScript primarily uses // comments
+  
+  return false;
+}
+
 // References provider
 connection.onReferences((params) => {
   const document = documents.get(params.textDocument.uri);
@@ -1371,13 +1411,16 @@ connection.onReferences((params) => {
     const l = lines[li] || '';
     let m: RegExpExecArray | null;
     while ((m = wordRegex.exec(l)) !== null) {
-      results.push({
-        uri: params.textDocument.uri,
-        range: {
-          start: { line: li, character: m.index },
-          end: { line: li, character: m.index + word.length }
-        }
-      });
+      // Skip if this match is in a comment
+      if (!isInComment(l, m.index)) {
+        results.push({
+          uri: params.textDocument.uri,
+          range: {
+            start: { line: li, character: m.index },
+            end: { line: li, character: m.index + word.length }
+          }
+        });
+      }
     }
   }
 

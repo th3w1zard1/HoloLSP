@@ -135,7 +135,8 @@ Configure HoloLSP through VS Code settings:
 
 ```json
 {
-  "holoLSP.maxNumberOfProblems": 100
+  "holoLSP.maxNumberOfProblems": 100,
+  "holoLSP.builtinScriptsDirectory": "/path/to/kotor/scripts"
 }
 ```
 
@@ -143,6 +144,9 @@ Configure HoloLSP through VS Code settings:
 
 - `holoLSP.maxNumberOfProblems` (number, default: 100)  
   Controls the maximum number of problems produced by the server. Configure this if it does not run well on your system.
+
+- `holoLSP.builtinScriptsDirectory` (string, optional)  
+  Directory path for builtin KOTOR scripts. When set, "Go to Definition" for included scripts will resolve to files in this directory instead of using the virtual `hololsp://` scheme. Supports absolute paths, relative paths (relative to the current file), or `file://` URIs. This setting is particularly useful for non-VS Code LSP clients like Emacs that cannot handle custom URI schemes.
 
 ## Supported File Types
 
@@ -187,6 +191,24 @@ Evaluates complex expressions in real time:
 const int RESULT = 2 + 3 * 4; // Shows: RESULT = 14
 vector vPos = [1.0, 2.0, 3.0] + Vector(1.0, 0.0, 0.0); // Shows computed result
 ```
+
+#### Example Configuration for Non-VS Code Editors
+
+For editors like Emacs that work with the LSP but don't handle custom URI schemes:
+
+```json
+{
+  "holoLSP.builtinScriptsDirectory": "/tmp/nss",
+  "holoLSP.maxNumberOfProblems": 1000
+}
+```
+
+This will make "Go to Definition" return `file:///tmp/nss/k_inc_generic.nss` instead of `hololsp:/kotor/k_inc_generic.nss`.
+
+#### Recent Improvements
+
+- **Fixed "Go to Definition"**: Now supports configurable URI schemes for better compatibility with non-VS Code editors
+- **Improved "Find All References"**: Now excludes commented-out code from reference results
 
 ## Contributing
 

@@ -32,6 +32,11 @@
           "default": 100,
           "description": "Controls the maximum number of problems produced by the server."
         },
+        "holoLSP.builtinScriptsDirectory": {
+          "scope": "resource",
+          "type": "string",
+          "description": "Directory path for builtin KOTOR scripts. Can be absolute path, relative path, or file:// URI. If not set, uses hololsp:// virtual scheme."
+        },
         "holoLSP.trace.server": {
           "scope": "window",
           "type": "string",
