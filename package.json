@@ -5,6 +5,10 @@
   "license": "MIT",
   "version": "1.0.0",
   "publisher": "holo-lsp",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/HoloLSP/holo-lsp.git"
+  },
   "categories": [
     "Languages",
     "Programming Languages",
